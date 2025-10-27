@@ -1,6 +1,6 @@
 import { parseCSV } from './csvNormalizer';
 
-interface ParsedTrade {
+export interface ParsedTrade {
   symbol: string;
   trade_type: 'long' | 'short';
   entry_date: string;
@@ -10,6 +10,9 @@ interface ParsedTrade {
   quantity: number;
   fees: number;
   notes: string | null;
+  stop_price?: number | null;
+  initial_risk?: number | null;
+  r_multiple?: number | null;
 }
 
 export function parseNormalizedCSV(text: string): ParsedTrade[] {
@@ -73,6 +76,9 @@ export function parseNormalizedCSV(text: string): ParsedTrade[] {
       const exitDate = row.exitedat || row.exit_time || row.filledat;
       const fees = parseFloat(row.fees || row.commissions) || 0;
       const pnl = parseFloat(row.pnl || row.profit) || 0;
+      const stopPrice = parseFloat(row.stopprice || row.stop_price || row.stoploss || row.stop_loss) || null;
+      const riskAmount = parseFloat(row.riskamount || row.initialrisk || row.initial_risk || row.risk || row.risk_amount) || null;
+      const rMultiple = parseFloat(row.rmultiple || row.r_multiple) || null;
 
       if (!symbol) {
         console.log(`⚠️ Row ${index + 1}: Missing symbol (checked: contractname, symbol, instrument)`);
@@ -97,6 +103,9 @@ export function parseNormalizedCSV(text: string): ParsedTrade[] {
         quantity: size,
         fees: fees,
         notes: pnl ? `P&L: $${pnl.toFixed(2)}` : null,
+        stop_price: stopPrice || undefined,
+        initial_risk: riskAmount ? Math.abs(riskAmount) : undefined,
+        r_multiple: rMultiple || (riskAmount ? pnl / Math.abs(riskAmount) : undefined),
       });
 
       console.log(`  ✅ Trade ${index + 1}:`, {
@@ -167,6 +176,8 @@ export function parseNormalizedCSV(text: string): ParsedTrade[] {
         const size = parseInt(order.size) || 0;
         const executePrice = parseFloat(order.executeprice) || 0;
         const filledAt = order.filledat || order.createdat || order.tradeday;
+        const stopPrice = parseFloat(order.stopprice || order.stop_price) || null;
+        const riskAmount = parseFloat(order.riskamount || order.initialrisk || order.initial_risk || order.risk) || null;
 
         console.log(`  Order ${index + 1}:`, {
           symbol,
@@ -186,6 +197,8 @@ export function parseNormalizedCSV(text: string): ParsedTrade[] {
             entryDate: filledAt,
             exitPrice: null,
             exitDate: null,
+            stopPrice,
+            riskAmount,
           });
         } else if (positionDisposition === 'closing') {
           let foundOpening = false;
@@ -193,6 +206,8 @@ export function parseNormalizedCSV(text: string): ParsedTrade[] {
             if (trade.symbol === symbol && trade.side !== side && trade.size === size && !trade.exitPrice) {
               trade.exitPrice = executePrice;
               trade.exitDate = filledAt;
+              trade.stopPrice = trade.stopPrice || stopPrice;
+              trade.riskAmount = trade.riskAmount || riskAmount;
               foundOpening = true;
               console.log(`    ✅ Paired closing order with opening`);
               break;
@@ -209,6 +224,8 @@ export function parseNormalizedCSV(text: string): ParsedTrade[] {
               entryDate: filledAt,
               exitPrice: executePrice,
               exitDate: filledAt,
+              stopPrice,
+              riskAmount,
             });
             console.log(`    ⚠️ Closing order without opening - creating standalone trade`);
           }
@@ -219,6 +236,16 @@ export function parseNormalizedCSV(text: string): ParsedTrade[] {
 
       tradeMap.forEach(trade => {
         const isShort = ['ask', 'sell', 'short', 's'].includes(trade.side?.toLowerCase());
+        const riskAmount = trade.riskAmount
+          ? Math.abs(trade.riskAmount)
+          : (trade.stopPrice && trade.entryPrice
+            ? Math.abs((isShort ? trade.stopPrice - trade.entryPrice : trade.entryPrice - trade.stopPrice) * trade.size)
+            : null);
+        const pnlValue = trade.exitPrice && trade.entryPrice
+          ? (isShort
+            ? (trade.entryPrice - trade.exitPrice) * trade.size
+            : (trade.exitPrice - trade.entryPrice) * trade.size)
+          : 0;
 
         trades.push({
           symbol: trade.symbol.toUpperCase(),
@@ -230,6 +257,9 @@ export function parseNormalizedCSV(text: string): ParsedTrade[] {
           quantity: trade.size,
           fees: 0,
           notes: null,
+          stop_price: trade.stopPrice || undefined,
+          initial_risk: riskAmount || undefined,
+          r_multiple: riskAmount && riskAmount !== 0 ? pnlValue / riskAmount : undefined,
         });
       });
     } else {
@@ -241,6 +271,8 @@ export function parseNormalizedCSV(text: string): ParsedTrade[] {
         const size = parseInt(order.size || order.quantity) || 1;
         const executePrice = parseFloat(order.executeprice || order.price) || 0;
         const filledAt = order.filledat || order.createdat || order.tradeday;
+        const stopPrice = parseFloat(order.stopprice || order.stop_price) || null;
+        const riskAmount = parseFloat(order.riskamount || order.initialrisk || order.initial_risk || order.risk) || null;
 
         const isShort = ['ask', 'sell', 'short', 's'].includes(side?.toLowerCase());
 
@@ -254,6 +286,8 @@ export function parseNormalizedCSV(text: string): ParsedTrade[] {
           quantity: size,
           fees: 0,
           notes: 'Imported as open position',
+          stop_price: stopPrice || undefined,
+          initial_risk: riskAmount ? Math.abs(riskAmount) : undefined,
         });
 
         console.log(`  ✅ Trade ${index + 1}:`, {

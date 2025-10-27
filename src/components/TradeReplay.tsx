@@ -16,6 +16,9 @@ interface Trade {
   pnl: number;
   notes: string | null;
   replay_reviewed: boolean;
+  stop_price?: number | null;
+  initial_risk?: number | null;
+  r_multiple?: number | null;
 }
 
 interface TickData {

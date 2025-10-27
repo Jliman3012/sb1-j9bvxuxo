@@ -3,23 +3,11 @@ import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 import { Upload, FileText, AlertCircle, CheckCircle, X, RefreshCw, Download, Sparkles } from 'lucide-react';
 import { normalizeCSV, downloadCSV } from '../lib/csvNormalizer';
-import { parseNormalizedCSV } from '../lib/tradeParser';
+import { parseNormalizedCSV, ParsedTrade } from '../lib/tradeParser';
 
 interface ImportTradesProps {
   onClose: () => void;
   onSuccess: () => void;
-}
-
-interface ParsedTrade {
-  symbol: string;
-  trade_type: 'long' | 'short';
-  entry_date: string;
-  exit_date: string | null;
-  entry_price: number;
-  exit_price: number | null;
-  quantity: number;
-  fees: number;
-  notes: string | null;
 }
 
 export default function ImportTrades({ onClose, onSuccess }: ImportTradesProps) {
@@ -119,18 +107,53 @@ export default function ImportTrades({ onClose, onSuccess }: ImportTradesProps) 
     }
   };
 
-  const calculatePnL = (trade: ParsedTrade) => {
-    if (!trade.exit_price) return { pnl: 0, pnl_percentage: 0 };
+  const estimateInitialRisk = (trade: ParsedTrade) => {
+    const manualRisk = trade.initial_risk && !Number.isNaN(Number(trade.initial_risk))
+      ? Math.abs(Number(trade.initial_risk))
+      : null;
 
-    let pnl = 0;
-    if (trade.trade_type === 'long') {
-      pnl = (trade.exit_price - trade.entry_price) * trade.quantity - trade.fees;
-    } else {
-      pnl = (trade.entry_price - trade.exit_price) * trade.quantity - trade.fees;
+    let derivedRisk = manualRisk;
+
+    if ((!derivedRisk || derivedRisk === 0) && trade.stop_price && trade.entry_price && trade.quantity) {
+      const priceDiff = trade.trade_type === 'long'
+        ? trade.entry_price - trade.stop_price
+        : trade.stop_price - trade.entry_price;
+
+      if (priceDiff > 0) {
+        derivedRisk = Math.abs(priceDiff * trade.quantity);
+      }
     }
 
-    const pnl_percentage = (pnl / (trade.entry_price * trade.quantity)) * 100;
-    return { pnl, pnl_percentage };
+    if ((!derivedRisk || derivedRisk === 0) && trade.entry_price && trade.quantity) {
+      derivedRisk = Math.abs(trade.entry_price * trade.quantity * 0.01);
+    }
+
+    return derivedRisk && derivedRisk > 0 ? derivedRisk : null;
+  };
+
+  const calculatePnL = (trade: ParsedTrade) => {
+    let pnl = 0;
+    if (trade.exit_price) {
+      if (trade.trade_type === 'long') {
+        pnl = (trade.exit_price - trade.entry_price) * trade.quantity - trade.fees;
+      } else {
+        pnl = (trade.entry_price - trade.exit_price) * trade.quantity - trade.fees;
+      }
+    }
+
+    const basis = trade.entry_price && trade.quantity ? trade.entry_price * trade.quantity : 0;
+    const pnl_percentage = basis !== 0 ? (pnl / basis) * 100 : 0;
+
+    const estimatedRisk = estimateInitialRisk(trade);
+    let rMultiple: number | null = null;
+
+    if (estimatedRisk && estimatedRisk !== 0) {
+      rMultiple = pnl / estimatedRisk;
+    } else if (trade.r_multiple !== null && trade.r_multiple !== undefined && !Number.isNaN(Number(trade.r_multiple))) {
+      rMultiple = Number(trade.r_multiple);
+    }
+
+    return { pnl, pnl_percentage, initialRisk: estimatedRisk, rMultiple };
   };
 
   const handleImport = async () => {
@@ -152,7 +175,15 @@ export default function ImportTrades({ onClose, onSuccess }: ImportTradesProps) 
 
     try {
       const tradesToInsert = preview.map((trade, index) => {
-        const { pnl, pnl_percentage } = calculatePnL(trade);
+        const { pnl, pnl_percentage, initialRisk, rMultiple } = calculatePnL(trade);
+        const manualRisk = trade.initial_risk && !Number.isNaN(Number(trade.initial_risk))
+          ? Math.abs(Number(trade.initial_risk))
+          : null;
+        const riskValue = initialRisk ?? manualRisk;
+        const effectiveRMultiple = rMultiple !== null && rMultiple !== undefined
+          ? rMultiple
+          : (riskValue && riskValue !== 0 ? pnl / riskValue : null);
+
         const tradeData = {
           user_id: user!.id,
           account_id: accountId || null,
@@ -160,13 +191,18 @@ export default function ImportTrades({ onClose, onSuccess }: ImportTradesProps) 
           status: trade.exit_price ? 'closed' : 'open',
           pnl,
           pnl_percentage,
+          stop_price: trade.stop_price ?? null,
+          initial_risk: riskValue ?? null,
+          r_multiple: effectiveRMultiple ?? null,
         };
         console.log(`  Trade ${index + 1}:`, {
           symbol: trade.symbol,
           type: trade.trade_type,
           entry: trade.entry_price,
           exit: trade.exit_price,
-          pnl: pnl.toFixed(2)
+          pnl: pnl.toFixed(2),
+          risk: riskValue ?? 'n/a',
+          rMultiple: effectiveRMultiple ?? 'n/a'
         });
         return tradeData;
       });
@@ -362,12 +398,18 @@ export default function ImportTrades({ onClose, onSuccess }: ImportTradesProps) 
                         <th className="px-4 py-2 text-left text-xs font-semibold text-gray-700 dark:text-gray-300">Entry</th>
                         <th className="px-4 py-2 text-left text-xs font-semibold text-gray-700 dark:text-gray-300">Exit</th>
                         <th className="px-4 py-2 text-left text-xs font-semibold text-gray-700 dark:text-gray-300">Qty</th>
+                        <th className="px-4 py-2 text-left text-xs font-semibold text-gray-700 dark:text-gray-300">Risk</th>
                         <th className="px-4 py-2 text-left text-xs font-semibold text-gray-700 dark:text-gray-300">P&L</th>
+                        <th className="px-4 py-2 text-left text-xs font-semibold text-gray-700 dark:text-gray-300">R-Mult</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
                       {preview.slice(0, 10).map((trade, index) => {
-                        const { pnl } = calculatePnL(trade);
+                        const { pnl, rMultiple, initialRisk } = calculatePnL(trade);
+                        const manualRisk = trade.initial_risk && !Number.isNaN(Number(trade.initial_risk))
+                          ? Math.abs(Number(trade.initial_risk))
+                          : null;
+                        const riskValue = initialRisk ?? manualRisk;
                         return (
                           <tr key={index} className="hover:bg-gray-50 dark:hover:bg-gray-900">
                             <td className="px-4 py-2 font-medium text-gray-900 dark:text-white">{trade.symbol}</td>
@@ -385,8 +427,14 @@ export default function ImportTrades({ onClose, onSuccess }: ImportTradesProps) 
                               {trade.exit_price ? `$${trade.exit_price.toFixed(2)}` : '-'}
                             </td>
                             <td className="px-4 py-2 text-gray-700 dark:text-gray-300">{trade.quantity}</td>
+                            <td className="px-4 py-2 text-gray-700 dark:text-gray-300">
+                              {riskValue ? `$${riskValue.toFixed(2)}` : '—'}
+                            </td>
                             <td className={`px-4 py-2 font-semibold ${pnl >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>
                               {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                            </td>
+                            <td className="px-4 py-2 text-gray-700 dark:text-gray-300">
+                              {rMultiple !== null && rMultiple !== undefined ? rMultiple.toFixed(2) : riskValue ? (pnl / riskValue).toFixed(2) : '—'}
                             </td>
                           </tr>
                         );
