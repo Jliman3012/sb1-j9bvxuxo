@@ -23,6 +23,8 @@ export default function AddTrade({ onBack }: AddTradeProps) {
     exit_price: '',
     quantity: '',
     fees: '0',
+    stop_price: '',
+    initial_risk: '',
     status: 'closed',
     notes: '',
   });
@@ -56,12 +58,19 @@ export default function AddTrade({ onBack }: AddTradeProps) {
     const entryPrice = parseFloat(formData.entry_price);
     const exitPrice = parseFloat(formData.exit_price);
     const quantity = parseFloat(formData.quantity);
-    const fees = parseFloat(formData.fees);
+    const feesValue = parseFloat(formData.fees);
+    const fees = isNaN(feesValue) ? 0 : feesValue;
+    const stopPrice = parseFloat(formData.stop_price);
+    const manualRisk = parseFloat(formData.initial_risk);
 
-    if (!entryPrice || !quantity) return { pnl: 0, pnlPercentage: 0 };
+    if (!entryPrice || !quantity) {
+      const fallbackRisk = calculateInitialRisk(entryPrice, quantity, stopPrice, manualRisk);
+      return { pnl: 0, pnlPercentage: 0, rMultiple: 0, initialRisk: fallbackRisk };
+    }
 
     if (!exitPrice) {
-      return { pnl: 0, pnlPercentage: 0 };
+      const derivedRisk = calculateInitialRisk(entryPrice, quantity, stopPrice, manualRisk);
+      return { pnl: 0, pnlPercentage: 0, rMultiple: 0, initialRisk: derivedRisk };
     }
 
     let pnl = 0;
@@ -72,8 +81,39 @@ export default function AddTrade({ onBack }: AddTradeProps) {
     }
 
     const pnlPercentage = (pnl / (entryPrice * quantity)) * 100;
+    const initialRisk = calculateInitialRisk(entryPrice, quantity, stopPrice, manualRisk, formData.trade_type);
+    const rMultiple = initialRisk > 0 ? pnl / initialRisk : 0;
 
-    return { pnl, pnlPercentage };
+    return { pnl, pnlPercentage, rMultiple, initialRisk };
+  };
+
+  const calculateInitialRisk = (
+    entryPrice: number,
+    quantity: number,
+    stopPrice: number,
+    manualRisk: number,
+    tradeType: 'long' | 'short' = formData.trade_type as 'long' | 'short'
+  ) => {
+    const size = isNaN(quantity) ? 0 : quantity;
+    let derivedRisk = 0;
+
+    if (!isNaN(stopPrice) && stopPrice > 0 && size > 0 && !isNaN(entryPrice)) {
+      const priceDiff =
+        tradeType === 'long'
+          ? entryPrice - stopPrice
+          : stopPrice - entryPrice;
+
+      if (priceDiff > 0) {
+        derivedRisk = Math.abs(priceDiff * size);
+      }
+    }
+
+    const cleanedManualRisk = !isNaN(manualRisk) ? Math.abs(manualRisk) : 0;
+    if (cleanedManualRisk > 0) {
+      return cleanedManualRisk;
+    }
+
+    return derivedRisk;
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -86,7 +126,7 @@ export default function AddTrade({ onBack }: AddTradeProps) {
         throw new Error('Please add a broker account first');
       }
 
-      const { pnl, pnlPercentage } = calculatePnL();
+      const { pnl, pnlPercentage, rMultiple, initialRisk } = calculatePnL();
 
       const { error } = await supabase.from('trades').insert({
         user_id: user!.id,
@@ -103,6 +143,9 @@ export default function AddTrade({ onBack }: AddTradeProps) {
         fees: parseFloat(formData.fees),
         status: formData.status,
         notes: formData.notes || null,
+        stop_price: formData.stop_price ? parseFloat(formData.stop_price) : null,
+        initial_risk: initialRisk && initialRisk > 0 ? initialRisk : null,
+        r_multiple: initialRisk && initialRisk > 0 ? rMultiple : null,
       });
 
       if (error) throw error;
@@ -115,7 +158,7 @@ export default function AddTrade({ onBack }: AddTradeProps) {
     }
   };
 
-  const { pnl, pnlPercentage } = calculatePnL();
+  const { pnl, pnlPercentage, rMultiple, initialRisk } = calculatePnL();
 
   return (
     <div>
@@ -294,8 +337,42 @@ export default function AddTrade({ onBack }: AddTradeProps) {
             </div>
           </div>
 
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                Planned Stop Price
+              </label>
+              <input
+                type="number"
+                step="any"
+                value={formData.stop_price}
+                onChange={(e) => updateField('stop_price', e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
+                placeholder="142.00"
+              />
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                Used to estimate risk. For longs use stop below entry, for shorts above entry.
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                Initial Risk (USD)
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                value={formData.initial_risk}
+                onChange={(e) => updateField('initial_risk', e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
+                placeholder="250"
+              />
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                Leave blank to auto-calc from stop. We'll use whichever is higher confidence.
+              </p>
+            </div>
+          </div>
 
-          {formData.exit_price && formData.entry_price && formData.quantity && (
+          {formData.entry_price && formData.quantity && (
             <div className="bg-gradient-to-br from-emerald-50 to-blue-50 dark:from-emerald-900/20 dark:to-blue-900/20 rounded-lg p-5 border-2 border-emerald-200 dark:border-emerald-800">
               <div className="flex items-center justify-between">
                 <div>
@@ -308,6 +385,26 @@ export default function AddTrade({ onBack }: AddTradeProps) {
                   <p className="text-xs text-gray-600 dark:text-gray-400 mb-1">Return</p>
                   <p className={`text-3xl font-bold ${pnl >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>
                     {pnl >= 0 ? '+' : ''}{pnlPercentage.toFixed(2)}%
+                  </p>
+                </div>
+              </div>
+              <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <p className="text-xs text-gray-600 dark:text-gray-400 mb-1">Initial Risk</p>
+                  <p className="text-lg font-semibold text-gray-900 dark:text-white">
+                    {initialRisk && initialRisk > 0 ? `$${initialRisk.toFixed(2)}` : '—'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-600 dark:text-gray-400 mb-1">R Multiple</p>
+                  <p className="text-lg font-semibold text-gray-900 dark:text-white">
+                    {initialRisk && initialRisk > 0 ? rMultiple.toFixed(2) : '—'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-600 dark:text-gray-400 mb-1">Stop Price</p>
+                  <p className="text-lg font-semibold text-gray-900 dark:text-white">
+                    {formData.stop_price ? `$${parseFloat(formData.stop_price).toFixed(2)}` : '—'}
                   </p>
                 </div>
               </div>
