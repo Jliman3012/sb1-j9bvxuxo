@@ -1,4 +1,6 @@
 import Papa, { ParseStepResult } from 'papaparse';
+import { isTopstepHeader, mapTopstepRow, type TopstepRow } from './csv/adapters/topstep';
+import type { TargetTrade } from '@/types/trade';
 
 export interface TargetFormat {
   Id: string;
@@ -97,6 +99,10 @@ export function normalizeColumnName(colName: string): string {
 
 export function detectBrokerFormat(headers: string[]): string | null {
   const headerStr = headers.map(h => h.toLowerCase()).join(',');
+
+  if (isTopstepHeader(headers)) {
+    return 'topstep';
+  }
 
   if (headerStr.includes('ninjatrader') || (headers.includes('Instrument') && headers.includes('Avg fill price'))) {
     return 'ninjatrader';
@@ -206,6 +212,28 @@ export function normalizeCSV(csvText: string): { normalized: string; stats: { ro
 
   const columnMap: { [key: string]: number } = {};
   const targetHeaders = Object.keys(COLUMN_MAPPINGS);
+  const targetHeadersOrdered = [
+    'Id',
+    'AccountName',
+    'ContractName',
+    'Status',
+    'Type',
+    'Size',
+    'Side',
+    'CreatedAt',
+    'TradeDay',
+    'FilledAt',
+    'CancelledAt',
+    'StopPrice',
+    'RiskAmount',
+    'LimitPrice',
+    'ExecutePrice',
+    'PositionDisposition',
+    'CreationDisposition',
+    'RejectionReason',
+    'ExchangeOrderId',
+    'PlatformOrderId',
+  ];
 
   if (broker && BROKER_PRESETS[broker]) {
     const preset = BROKER_PRESETS[broker];
@@ -216,19 +244,59 @@ export function normalizeCSV(csvText: string): { normalized: string; stats: { ro
     });
   }
 
+  if (broker === 'topstep') {
+    const normalizedLines: string[][] = [targetHeadersOrdered];
+
+    const topstepRows = lines.slice(1).filter(row => row.some(cell => (cell ?? '').toString().trim() !== ''));
+
+    topstepRows.forEach(row => {
+      const record = headers.reduce((acc, header, index) => {
+        acc[header] = row[index];
+        return acc;
+      }, {} as TopstepRow);
+
+      const mapped: TargetTrade = mapTopstepRow(record);
+
+      const values = targetHeadersOrdered.map(header => {
+        const value = (mapped as Record<string, string>)[header];
+        if (header === 'RiskAmount') {
+          return '';
+        }
+        return value ?? '';
+      });
+
+      normalizedLines.push(values);
+    });
+
+    const csvOutput = normalizedLines
+      .map(row =>
+        row
+          .map(cell => {
+            if (cell.includes(',') || cell.includes('"') || cell.includes('\n')) {
+              return `"${cell.replace(/"/g, '""')}"`;
+            }
+            return cell;
+          })
+          .join(','),
+      )
+      .join('\n');
+
+    return {
+      normalized: csvOutput,
+      stats: {
+        rowsProcessed: normalizedLines.length - 1,
+        columnsMatched: targetHeadersOrdered.length,
+        broker: 'topstep',
+      },
+    };
+  }
+
   headers.forEach((header, index) => {
     const normalized = normalizeColumnName(header);
     if (targetHeaders.includes(normalized)) {
       columnMap[normalized] = index;
     }
   });
-
-  const targetHeadersOrdered = [
-    'Id', 'AccountName', 'ContractName', 'Status', 'Type', 'Size', 'Side',
-    'CreatedAt', 'TradeDay', 'FilledAt', 'CancelledAt', 'StopPrice', 'RiskAmount', 'LimitPrice',
-    'ExecutePrice', 'PositionDisposition', 'CreationDisposition', 'RejectionReason',
-    'ExchangeOrderId', 'PlatformOrderId'
-  ];
 
   const normalizedLines: string[][] = [targetHeadersOrdered];
 

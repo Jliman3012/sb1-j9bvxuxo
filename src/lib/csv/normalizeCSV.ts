@@ -2,11 +2,14 @@ import Papa from 'papaparse';
 import { z } from 'zod';
 import { normalizeHeader, type ManualHeaderMap, type TargetHeader } from './headerAliases';
 import { mergeDateAndTime, normalizeNumber, sanitizeAndNormalizeDate } from './datetime';
+import { isTopstepHeader, mapTopstepRow, type TopstepRow } from './adapters/topstep';
+import type { TargetTrade } from '@/types/trade';
 
 export interface NormalizationOptions {
   manualHeaderMap?: ManualHeaderMap;
   fallbackDate?: Date;
   limit?: number;
+  accountName?: string;
 }
 
 export interface NormalizedTrade {
@@ -166,7 +169,7 @@ const createDateGroups = (headers: string[]): Record<'created' | 'filled' | 'tra
 
 export const normalizeCSV = (
   csvContent: string,
-  { manualHeaderMap, fallbackDate, limit }: NormalizationOptions = {},
+  { manualHeaderMap, fallbackDate, limit, accountName }: NormalizationOptions = {},
 ): NormalizeCSVResult => {
   const delimiter = detectDelimiter(csvContent);
 
@@ -208,10 +211,88 @@ export const normalizeCSV = (
   });
 
   const normalizedRows: NormalizedRowResult[] = [];
+  const topstepDetected = isTopstepHeader(rawHeaders);
+  const resolvedAccountName = accountName ?? (topstepDetected ? 'Topstep' : '');
+
+  const emptyToNull = (value: string) => {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  };
+
+  const toNormalizedTrade = (trade: TargetTrade): NormalizedTrade => ({
+    Id: trade.Id,
+    AccountName: trade.AccountName || resolvedAccountName,
+    ContractName: trade.ContractName,
+    Status: trade.Status || 'Filled',
+    Type: trade.Type || 'Market',
+    Size: normalizeNumber(trade.Size),
+    Side: trade.Side || 'Buy',
+    CreatedAt: emptyToNull(trade.CreatedAt),
+    TradeDay: emptyToNull(trade.TradeDay),
+    FilledAt: emptyToNull(trade.FilledAt),
+    CancelledAt: emptyToNull(trade.CancelledAt),
+    StopPrice: normalizeNumber(trade.StopPrice),
+    LimitPrice: normalizeNumber(trade.LimitPrice),
+    ExecutePrice: normalizeNumber(trade.ExecutePrice),
+    PositionDisposition: emptyToNull(trade.PositionDisposition),
+    CreationDisposition: emptyToNull(trade.CreationDisposition),
+    RejectionReason: emptyToNull(trade.RejectionReason),
+    ExchangeOrderId: emptyToNull(trade.ExchangeOrderId),
+    PlatformOrderId: emptyToNull(trade.PlatformOrderId),
+  });
 
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
     if (!row || row.every(cell => (cell ?? '').toString().trim() === '')) {
+      continue;
+    }
+
+    if (topstepDetected) {
+      const entry: TopstepRow = rawHeaders.reduce((acc, header, index) => {
+        acc[header] = row[index];
+        return acc;
+      }, {} as TopstepRow);
+
+      const target = mapTopstepRow(entry, resolvedAccountName || 'Topstep');
+      const baseRow = toNormalizedTrade(target);
+      const warnings: string[] = [];
+
+      if (!baseRow.Side || baseRow.Side.trim().length === 0) {
+        warnings.push('Missing Side direction.');
+        baseRow.Side = 'Buy';
+      }
+
+      if (baseRow.Size !== null && baseRow.Size <= 0) {
+        warnings.push('Size must be greater than zero.');
+      }
+
+      if (baseRow.ExecutePrice !== null && baseRow.ExecutePrice <= 0) {
+        warnings.push('Execute price must be greater than zero.');
+      }
+
+      if (!baseRow.Id) {
+        warnings.push('Missing identifier (Id).');
+      }
+
+      if (!baseRow.CreatedAt) {
+        warnings.push('Missing CreatedAt timestamp.');
+      }
+
+      if (!baseRow.TradeDay && baseRow.CreatedAt) {
+        baseRow.TradeDay = `${baseRow.CreatedAt.split(' ')[0]} 00:00:00`;
+      }
+
+      const parsedRow = NormalizedTradeSchema.safeParse(baseRow);
+      if (!parsedRow.success) {
+        warnings.push(...parsedRow.error.errors.map(error => error.message));
+      }
+
+      normalizedRows.push({ row: parsedRow.success ? parsedRow.data : baseRow, warnings });
+
+      if (limit && normalizedRows.length >= limit) {
+        break;
+      }
+
       continue;
     }
 

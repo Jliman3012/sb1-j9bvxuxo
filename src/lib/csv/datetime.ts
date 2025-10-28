@@ -140,3 +140,39 @@ export const normalizeNumber = (value: unknown): number | null => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
+const cleanIsoString = (value: string | null | undefined): string => {
+  if (!value) {
+    return '';
+  }
+  const normalized = sanitizeAndNormalizeDate(value);
+  return normalized ?? '';
+};
+
+export const toISODateTime = (value: string | null | undefined): string => cleanIsoString(value);
+
+export const toISODate = (value: string | null | undefined): string => {
+  const normalizedDateTime = cleanIsoString(value);
+  if (normalizedDateTime) {
+    return normalizedDateTime.split(' ')[0] ?? '';
+  }
+
+  const raw = value?.trim();
+  if (!raw) {
+    return '';
+  }
+
+  const slashMatch = raw.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (slashMatch) {
+    const [, mm, dd, yyyy] = slashMatch;
+    return `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
+  }
+
+  const hyphenMatch = raw.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (hyphenMatch) {
+    const [, yyyy, mm, dd] = hyphenMatch;
+    return `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
+  }
+
+  return '';
+};
+
