@@ -166,7 +166,7 @@ export default function AdvancedAnalytics() {
       )}
 
       {riskMetrics && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
           <MetricCard
             title="Risk Health"
             value={`${riskMetrics.riskHealthScore}%`}
@@ -194,6 +194,13 @@ export default function AdvancedAnalytics() {
             icon={<TrendingUp className="w-6 h-6" />}
             color={riskMetrics.profitFactor >= 2 ? 'emerald' : riskMetrics.profitFactor >= 1 ? 'blue' : 'red'}
             subtitle="Gross profit / loss"
+          />
+          <MetricCard
+            title="Avg R-Multiple"
+            value={riskMetrics.averageRMultiple.toFixed(2)}
+            icon={<Target className="w-6 h-6" />}
+            color={riskMetrics.averageRMultiple >= 2 ? 'emerald' : riskMetrics.averageRMultiple >= 1 ? 'blue' : 'amber'}
+            subtitle="Reward vs. risk"
           />
         </div>
       )}

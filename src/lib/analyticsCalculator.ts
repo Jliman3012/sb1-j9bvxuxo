@@ -15,6 +15,7 @@ export interface RiskMetrics {
   avgRiskPerTrade: number;
   riskHealthScore: number;
   profitFactor: number;
+  averageRMultiple: number;
 }
 
 export interface PsychologyMetrics {
@@ -177,9 +178,50 @@ export function calculateRiskMetrics(trades: Trade[], initialCapital: number = 1
   const totalPnL = completedTrades.reduce((sum, t) => sum + t.pnl, 0);
   const recoveryFactor = maxDrawdown > 0 ? totalPnL / maxDrawdown : 0;
 
-  const avgRiskPerTrade = completedTrades.length > 0
-    ? completedTrades.reduce((sum, t) => sum + Math.abs(t.entry_price * t.quantity * 0.01), 0) / completedTrades.length
-    : 0;
+  const riskAccumulator = completedTrades.reduce((acc, trade) => {
+    const manualRisk = trade.initial_risk && !Number.isNaN(Number(trade.initial_risk))
+      ? Math.abs(Number(trade.initial_risk))
+      : null;
+
+    let derivedRisk = manualRisk;
+
+    if ((manualRisk === null || manualRisk === 0) && trade.stop_price && trade.entry_price && trade.quantity) {
+      const priceDiff = trade.trade_type === 'long'
+        ? Number(trade.entry_price) - Number(trade.stop_price)
+        : Number(trade.stop_price) - Number(trade.entry_price);
+      if (priceDiff > 0) {
+        derivedRisk = Math.abs(priceDiff * Number(trade.quantity));
+      }
+    }
+
+    if ((derivedRisk === null || derivedRisk === 0) && trade.entry_price && trade.quantity) {
+      derivedRisk = Math.abs(Number(trade.entry_price) * Number(trade.quantity) * 0.01);
+    }
+
+    if (derivedRisk && derivedRisk > 0) {
+      acc.totalRisk += derivedRisk;
+      acc.count += 1;
+    }
+
+    const existingRMultiple = trade.r_multiple !== null && trade.r_multiple !== undefined && !Number.isNaN(Number(trade.r_multiple))
+      ? Number(trade.r_multiple)
+      : null;
+
+    let computedRMultiple = existingRMultiple;
+    if ((computedRMultiple === null || computedRMultiple === undefined) && derivedRisk && derivedRisk > 0) {
+      computedRMultiple = Number(trade.pnl) / derivedRisk;
+    }
+
+    if (computedRMultiple !== null && computedRMultiple !== undefined) {
+      acc.totalRMultiple += computedRMultiple;
+      acc.rCount += 1;
+    }
+
+    return acc;
+  }, { totalRisk: 0, count: 0, totalRMultiple: 0, rCount: 0 });
+
+  const avgRiskPerTrade = riskAccumulator.count > 0 ? riskAccumulator.totalRisk / riskAccumulator.count : 0;
+  const averageRMultiple = riskAccumulator.rCount > 0 ? riskAccumulator.totalRMultiple / riskAccumulator.rCount : 0;
 
   const winningTrades = completedTrades.filter(t => t.pnl > 0);
   const losingTrades = completedTrades.filter(t => t.pnl < 0);
@@ -196,6 +238,7 @@ export function calculateRiskMetrics(trades: Trade[], initialCapital: number = 1
     avgRiskPerTrade,
     riskHealthScore,
     profitFactor,
+    averageRMultiple,
   };
 }
 
