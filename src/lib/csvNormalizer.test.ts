@@ -13,11 +13,12 @@ describe('normalizeCSV identifier handling', () => {
 
     expect(first.stats.rowsMissingIdentifiers).toBe(1);
     expect(first.stats.deterministicIdsAssigned).toBe(1);
+    expect(first.stats.missingIdentifierRows).toEqual([2]);
 
     const firstParsed = parseCSV(first.normalized);
     const secondParsed = parseCSV(second.normalized);
 
-    expect(firstParsed[1][0]).toMatch(/^ORDER_[0-9a-f]{8}$/);
+    expect(firstParsed[1][0]).toMatch(/^ORDER_[0-9a-f]{16}$/);
     expect(firstParsed[1][0]).toBe(secondParsed[1][0]);
   });
 
@@ -32,6 +33,29 @@ describe('normalizeCSV identifier handling', () => {
 
     expect(result.stats.rowsMissingIdentifiers).toBe(0);
     expect(result.stats.deterministicIdsAssigned).toBe(0);
+    expect(result.stats.missingIdentifierRows).toEqual([]);
     expect(parsed[1][0]).toBe('ABC123');
+  });
+
+  it('produces stable identifiers even if column order changes', () => {
+    const csvOriginal = [
+      'ContractName,ExecutePrice,Size,Side,CreatedAt',
+      'ESU4,4500.5,2,Buy,2024-08-01 13:30:00'
+    ].join('\n');
+
+    const csvReordered = [
+      'Side,Size,CreatedAt,ExecutePrice,ContractName',
+      'Buy,2,2024-08-01 13:30:00,4500.5,ESU4'
+    ].join('\n');
+
+    const first = normalizeCSV(csvOriginal);
+    const second = normalizeCSV(csvReordered);
+
+    const firstParsed = parseCSV(first.normalized);
+    const secondParsed = parseCSV(second.normalized);
+
+    expect(firstParsed[1][0]).toBe(secondParsed[1][0]);
+    expect(first.stats.deterministicIdsAssigned).toBe(1);
+    expect(second.stats.deterministicIdsAssigned).toBe(1);
   });
 });

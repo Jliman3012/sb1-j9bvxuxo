@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 import { Upload, FileText, AlertCircle, CheckCircle, X, RefreshCw, Download, Sparkles } from 'lucide-react';
-import { normalizeCSV, downloadCSV } from '../lib/csvNormalizer';
+import { normalizeCSV, downloadCSV, type NormalizationStats } from '../lib/csvNormalizer';
 import { parseNormalizedCSV, ParsedTrade } from '../lib/tradeParser';
 
 interface ImportTradesProps {
@@ -22,7 +22,7 @@ export default function ImportTrades({ onClose, onSuccess }: ImportTradesProps) 
   const [accountId, setAccountId] = useState('');
   const [accounts, setAccounts] = useState<any[]>([]);
   const [normalizedCSV, setNormalizedCSV] = useState('');
-  const [normalizationStats, setNormalizationStats] = useState<any>(null);
+  const [normalizationStats, setNormalizationStats] = useState<NormalizationStats | null>(null);
 
   useEffect(() => {
     loadAccounts();
@@ -79,7 +79,11 @@ export default function ImportTrades({ onClose, onSuccess }: ImportTradesProps) 
       setNormalizationStats(stats);
 
       if (stats.rowsMissingIdentifiers > 0) {
-        const warningMsg = `${stats.rowsMissingIdentifiers} row${stats.rowsMissingIdentifiers === 1 ? '' : 's'} are missing Id, ExchangeOrderId, and PlatformOrderId. Deterministic IDs were generated to keep imports stable.`;
+        const affectedRows = stats.missingIdentifierRows.slice(0, 5).join(', ');
+        const moreRows = stats.missingIdentifierRows.length > 5
+          ? ` and ${stats.missingIdentifierRows.length - 5} more`
+          : '';
+        const warningMsg = `${stats.rowsMissingIdentifiers} row${stats.rowsMissingIdentifiers === 1 ? '' : 's'} are missing Id, ExchangeOrderId, and PlatformOrderId. Deterministic IDs were generated to keep imports stable.${affectedRows ? ` (Rows ${affectedRows}${moreRows})` : ''}`;
         console.warn('⚠️', warningMsg);
         setWarning(warningMsg);
       } else {
@@ -392,6 +396,11 @@ export default function ImportTrades({ onClose, onSuccess }: ImportTradesProps) 
                   <p className="text-lg font-bold text-gray-900 dark:text-white">{normalizationStats.deterministicIdsAssigned}</p>
                 </div>
               </div>
+              {normalizationStats.rowsMissingIdentifiers > 0 && (
+                <p className="mt-3 text-xs text-gray-600 dark:text-gray-400">
+                  Rows missing identifiers: {normalizationStats.missingIdentifierRows.join(', ')}
+                </p>
+              )}
               <button
                 onClick={handleDownloadNormalized}
                 className="mt-3 flex items-center space-x-2 text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"

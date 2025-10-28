@@ -87,29 +87,69 @@ export interface NormalizationStats {
   broker: string | null;
   rowsMissingIdentifiers: number;
   deterministicIdsAssigned: number;
+  missingIdentifierRows: number[];
 }
 
-function generateDeterministicId(row: Record<string, string>, fallbackSeed: string): string {
-  const stableFields = [
-    row.ExchangeOrderId,
-    row.PlatformOrderId,
-    row.AccountName,
-    row.ContractName,
-    row.CreatedAt,
-    row.TradeDay,
-    row.ExecutePrice,
-    row.Size,
-    row.Side,
-  ].filter(Boolean);
+const TARGET_HEADERS_ORDERED = [
+  'Id', 'AccountName', 'ContractName', 'Status', 'Type', 'Size', 'Side',
+  'CreatedAt', 'TradeDay', 'FilledAt', 'CancelledAt', 'StopPrice', 'RiskAmount', 'LimitPrice',
+  'ExecutePrice', 'PositionDisposition', 'CreationDisposition', 'RejectionReason',
+  'ExchangeOrderId', 'PlatformOrderId'
+];
 
-  const source = stableFields.length > 0 ? stableFields.join('|') : fallbackSeed;
+const DETERMINISTIC_ID_FIELDS = [
+  'ExchangeOrderId',
+  'PlatformOrderId',
+  'AccountName',
+  'ContractName',
+  'TradeDay',
+  'CreatedAt',
+  'ExecutePrice',
+  'Size',
+  'Side',
+];
 
-  let hash = 0;
-  for (let i = 0; i < source.length; i++) {
-    hash = (hash * 31 + source.charCodeAt(i)) >>> 0;
+function hashString(value: string): string {
+  let h1 = 0xdeadbeef ^ value.length;
+  let h2 = 0x41c6ce57 ^ value.length;
+
+  for (let i = 0; i < value.length; i++) {
+    const ch = value.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
   }
 
-  return `ORDER_${hash.toString(16).padStart(8, '0')}`;
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+
+  const combined = 4294967296 * (2097151 & h2) + (h1 >>> 0);
+  return combined.toString(16).padStart(16, '0');
+}
+
+function buildDeterministicIdSource(row: Record<string, string>): string | null {
+  const stableParts = DETERMINISTIC_ID_FIELDS
+    .map(field => row[field]?.trim())
+    .filter((value): value is string => Boolean(value && value !== ''));
+
+  if (stableParts.length > 0) {
+    return stableParts.join('|');
+  }
+
+  const fallbackParts = TARGET_HEADERS_ORDERED
+    .filter(header => header !== 'Id')
+    .map(header => `${header}:${row[header] ?? ''}`);
+
+  const fallbackSource = fallbackParts.join('|');
+  return fallbackSource.trim() === '' ? null : fallbackSource;
+}
+
+function generateDeterministicId(row: Record<string, string>): string | null {
+  const source = buildDeterministicIdSource(row);
+  if (!source) {
+    return null;
+  }
+
+  return `ORDER_${hashString(source)}`;
 }
 
 export function normalizeColumnName(colName: string): string {
@@ -276,16 +316,10 @@ export function normalizeCSV(csvText: string): { normalized: string; stats: Norm
     }
   });
 
-  const targetHeadersOrdered = [
-    'Id', 'AccountName', 'ContractName', 'Status', 'Type', 'Size', 'Side',
-    'CreatedAt', 'TradeDay', 'FilledAt', 'CancelledAt', 'StopPrice', 'RiskAmount', 'LimitPrice',
-    'ExecutePrice', 'PositionDisposition', 'CreationDisposition', 'RejectionReason',
-    'ExchangeOrderId', 'PlatformOrderId'
-  ];
-
-  const normalizedLines: string[][] = [targetHeadersOrdered];
+  const normalizedLines: string[][] = [TARGET_HEADERS_ORDERED];
   let rowsMissingIdentifiers = 0;
   let deterministicIdsAssigned = 0;
+  const missingIdentifierRows: number[] = [];
 
   for (let i = 1; i < lines.length; i++) {
     const row = lines[i];
@@ -296,7 +330,7 @@ export function normalizeCSV(csvText: string): { normalized: string; stats: Norm
 
     const normalizedRow: Record<string, string> = {};
 
-    for (const targetHeader of targetHeadersOrdered) {
+    for (const targetHeader of TARGET_HEADERS_ORDERED) {
       const sourceIndex = columnMap[targetHeader];
       let value = sourceIndex !== undefined ? row[sourceIndex] : '';
 
@@ -332,19 +366,20 @@ export function normalizeCSV(csvText: string): { normalized: string; stats: Norm
       if (fallbackIdentifier) {
         normalizedRow.Id = fallbackIdentifier;
       } else {
-        normalizedRow.Id = generateDeterministicId(
-          normalizedRow,
-          `${i}:${row.join('|')}`
-        );
-        deterministicIdsAssigned++;
+        const deterministicId = generateDeterministicId(normalizedRow);
+        if (deterministicId) {
+          normalizedRow.Id = deterministicId;
+          deterministicIdsAssigned++;
+        }
       }
     }
 
     if (!hadAnyIdentifier) {
       rowsMissingIdentifiers++;
+      missingIdentifierRows.push(i + 1);
     }
 
-    normalizedLines.push(targetHeadersOrdered.map(header => normalizedRow[header] || ''));
+    normalizedLines.push(TARGET_HEADERS_ORDERED.map(header => normalizedRow[header] || ''));
   }
 
   const csvOutput = normalizedLines.map(row =>
@@ -364,6 +399,7 @@ export function normalizeCSV(csvText: string): { normalized: string; stats: Norm
       broker: broker || 'unknown',
       rowsMissingIdentifiers,
       deterministicIdsAssigned,
+      missingIdentifierRows,
     },
   };
 }
