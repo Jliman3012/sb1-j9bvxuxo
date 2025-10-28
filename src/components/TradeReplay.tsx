@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { Play, Pause, RotateCcw, ChevronLeft, Gauge, TrendingUp, Clock } from 'lucide-react';
+import { createChart, IChartApi, ISeriesApi, UTCTimestamp, type CandlestickData, type SeriesMarker } from 'lightweight-charts';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
-import { Play, Pause, RotateCcw, ChevronLeft, Gauge, TrendingUp, TrendingDown, Clock } from 'lucide-react';
-import { createChart, IChartApi, ISeriesApi } from 'lightweight-charts';
+import { awardXpEvent } from '../lib/gamificationEvents';
 
 interface Trade {
   id: string;
@@ -25,11 +26,32 @@ interface TickData {
   time: number;
   price: number;
   volume: number;
+  open?: number;
+  high?: number;
+  low?: number;
+  close?: number;
 }
 
 interface TradeReplayProps {
   onBack: () => void;
 }
+
+interface MarketDataResponse {
+  data: MarketBar[];
+  source: 'polygon' | 'synthetic';
+}
+
+interface MarketBar {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+const REPLAY_XP_VALUE = 10;
+const MARKET_DATA_PADDING_MS = 60 * 60 * 1000; // 60 minutes around the trade
 
 export default function TradeReplay({ onBack }: TradeReplayProps) {
   const { user } = useAuth();
@@ -39,20 +61,105 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
   const [currentTick, setCurrentTick] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
-  const [insights, setInsights] = useState<string>('');
+  const [insights, setInsights] = useState('');
   const [loading, setLoading] = useState(false);
-  const chartContainerRef = useRef<HTMLDivElement>(null);
+  const [dataSource, setDataSource] = useState<'provider' | 'synthetic'>('synthetic');
+
+  const chartContainerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const candleCacheRef = useRef<CandlestickData[]>([]);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    loadTrades();
+    if (user?.id) {
+      loadTrades();
+    }
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!selectedTrade) {
+      disposeChart();
+      setTickData([]);
+      return;
+    }
+
+    initializeChart();
+
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      if (chartRef.current) chartRef.current.remove();
+      stopPlayback(false);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTrade?.id]);
+
+  useEffect(() => {
+    return () => {
+      stopPlayback(false);
+      disposeChart();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!isPlaying || tickData.length === 0) {
+      stopPlayback();
+      return;
+    }
+
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+    }
+
+    const intervalDuration = Math.max(80, 200 / speed);
+
+    intervalRef.current = setInterval(() => {
+      setCurrentTick(prev => {
+        if (prev >= tickData.length - 1) {
+          stopPlayback();
+          return prev;
+        }
+        return prev + 1;
+      });
+    }, intervalDuration);
+
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+  }, [isPlaying, speed, tickData]);
+
+  useEffect(() => {
+    if (tickData.length === 0) {
+      setCurrentTick(0);
+      if (seriesRef.current) {
+        seriesRef.current.setData([]);
+        seriesRef.current.setMarkers([]);
+      }
+      return;
+    }
+
+    candleCacheRef.current = buildCandles(tickData);
+    if (selectedTrade) {
+      applyMarkers(selectedTrade, tickData);
+    }
+    updateVisibleSeries(currentTick);
+    chartRef.current?.timeScale().fitContent();
+  }, [tickData, selectedTrade]);
+
+  useEffect(() => {
+    if (tickData.length === 0) {
+      return;
+    }
+    const nextIndex = Math.min(currentTick, Math.max(tickData.length - 1, 0));
+    if (nextIndex !== currentTick) {
+      setCurrentTick(nextIndex);
+      return;
+    }
+    updateVisibleSeries(nextIndex);
+  }, [currentTick, tickData]);
 
   const loadTrades = async () => {
     try {
@@ -71,127 +178,9 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
     }
   };
 
-  const generateSyntheticTickData = (trade: Trade): TickData[] => {
-    const entryTime = new Date(trade.entry_date).getTime();
-    const exitTime = trade.exit_date ? new Date(trade.exit_date).getTime() : entryTime + 3600000;
-    const duration = exitTime - entryTime;
-    const numTicks = Math.min(Math.max(Math.floor(duration / 1000), 50), 500);
-
-    const ticks: TickData[] = [];
-    const priceRange = Math.abs((trade.exit_price || trade.entry_price) - trade.entry_price);
-    const volatility = priceRange * 0.3;
-
-    let currentPrice = trade.entry_price;
-    const priceStep = ((trade.exit_price || trade.entry_price) - trade.entry_price) / numTicks;
-
-    for (let i = 0; i <= numTicks; i++) {
-      const time = entryTime + (duration * i / numTicks);
-      const noise = (Math.random() - 0.5) * volatility * 0.3;
-      currentPrice = trade.entry_price + (priceStep * i) + noise;
-
-      ticks.push({
-        time: Math.floor(time / 1000),
-        price: parseFloat(currentPrice.toFixed(2)),
-        volume: Math.floor(Math.random() * 1000) + 100
-      });
-    }
-
-    return ticks;
-  };
-
-  const selectTrade = async (trade: Trade) => {
-    setSelectedTrade(trade);
-    setCurrentTick(0);
-    setIsPlaying(false);
-    setLoading(true);
-
-    try {
-      const { data: replayData } = await supabase
-        .from('trade_replays')
-        .select('*')
-        .eq('trade_id', trade.id)
-        .maybeSingle();
-
-      let ticks: TickData[];
-      let aiInsights = '';
-
-      if (replayData && replayData.tick_data) {
-        ticks = replayData.tick_data as TickData[];
-        aiInsights = replayData.replay_insights || '';
-
-        await supabase
-          .from('trade_replays')
-          .update({ times_viewed: (replayData.times_viewed || 0) + 1 })
-          .eq('id', replayData.id);
-      } else {
-        ticks = generateSyntheticTickData(trade);
-        aiInsights = generateInsights(trade, ticks);
-
-        await supabase.from('trade_replays').insert({
-          trade_id: trade.id,
-          user_id: user!.id,
-          tick_data: ticks,
-          replay_insights: aiInsights,
-          times_viewed: 1
-        });
-      }
-
-      setTickData(ticks);
-      setInsights(aiInsights);
-      initializeChart(ticks, trade);
-
-      if (!trade.replay_reviewed) {
-        await supabase
-          .from('trades')
-          .update({ replay_reviewed: true })
-          .eq('id', trade.id);
-
-        await checkReplayBadge();
-      }
-    } catch (err) {
-      console.error('Error loading replay:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const generateInsights = (trade: Trade, ticks: TickData[]): string => {
-    const entryIndex = 0;
-    const exitIndex = ticks.length - 1;
-    const optimalEntryPrice = Math.min(...ticks.slice(0, Math.floor(ticks.length * 0.2)).map(t => t.price));
-    const entryDiff = Math.abs(trade.entry_price - optimalEntryPrice);
-    const pnlPercent = ((trade.pnl / (trade.entry_price * trade.quantity)) * 100).toFixed(2);
-
-    let insights = `Trade Performance: ${trade.pnl >= 0 ? 'Profit' : 'Loss'} of $${Math.abs(trade.pnl).toFixed(2)} (${pnlPercent}%)\n\n`;
-
-    if (entryDiff > trade.entry_price * 0.001) {
-      insights += `⚠️ Entry Timing: Missed optimal entry by ${entryDiff.toFixed(2)} points. `;
-      insights += `Could have entered at ${optimalEntryPrice.toFixed(2)} instead of ${trade.entry_price.toFixed(2)}.\n\n`;
-    } else {
-      insights += `✅ Entry Timing: Good entry near optimal price.\n\n`;
-    }
-
-    const maxAdverse = trade.trade_type === 'long'
-      ? Math.min(...ticks.map(t => t.price))
-      : Math.max(...ticks.map(t => t.price));
-    const maxFavorable = trade.trade_type === 'long'
-      ? Math.max(...ticks.map(t => t.price))
-      : Math.min(...ticks.map(t => t.price));
-
-    insights += `📊 Max Adverse: ${maxAdverse.toFixed(2)} | Max Favorable: ${maxFavorable.toFixed(2)}\n\n`;
-
-    if (trade.pnl < 0 && trade.exit_price) {
-      insights += `💡 Tip: Consider using a stop loss. This trade moved against you significantly.\n`;
-    }
-
-    return insights;
-  };
-
-  const initializeChart = (ticks: TickData[], trade: Trade) => {
-    if (!chartContainerRef.current) return;
-
-    if (chartRef.current) {
-      chartRef.current.remove();
+  const initializeChart = () => {
+    if (!chartContainerRef.current || chartRef.current) {
+      return;
     }
 
     const chart = createChart(chartContainerRef.current, {
@@ -211,7 +200,7 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
       },
     });
 
-    const candlestickSeries = chart.addCandlestickSeries({
+    const series = chart.addCandlestickSeries({
       upColor: '#10b981',
       downColor: '#ef4444',
       borderUpColor: '#10b981',
@@ -220,100 +209,366 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
       wickDownColor: '#ef4444',
     });
 
-    const candleData = ticks.map((tick, idx) => {
-      const nextTick = ticks[idx + 1] || tick;
-      return {
-        time: tick.time,
-        open: tick.price,
-        high: Math.max(tick.price, nextTick.price) + Math.random() * 0.5,
-        low: Math.min(tick.price, nextTick.price) - Math.random() * 0.5,
-        close: nextTick.price,
-      };
+    const resizeObserver = new ResizeObserver(entries => {
+      const entry = entries[0];
+      if (entry) {
+        chart.applyOptions({ width: Math.floor(entry.contentRect.width) });
+      }
     });
 
-    candlestickSeries.setData(candleData);
+    resizeObserver.observe(chartContainerRef.current);
 
-    const entryMarker = {
-      time: ticks[0].time,
-      position: trade.trade_type === 'long' ? 'belowBar' : 'aboveBar' as const,
+    chartRef.current = chart;
+    seriesRef.current = series;
+    resizeObserverRef.current = resizeObserver;
+  };
+
+  const disposeChart = () => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+    if (resizeObserverRef.current && chartContainerRef.current) {
+      resizeObserverRef.current.unobserve(chartContainerRef.current);
+      resizeObserverRef.current.disconnect();
+      resizeObserverRef.current = null;
+    }
+    if (chartRef.current) {
+      chartRef.current.remove();
+      chartRef.current = null;
+    }
+    seriesRef.current = null;
+  };
+
+  const stopPlayback = (updateState = true) => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+    if (updateState) {
+      setIsPlaying(false);
+    }
+  };
+
+  const buildCandles = (ticks: TickData[]): CandlestickData[] => {
+    return ticks.map((tick, idx) => {
+      const open = tick.open ?? tick.price;
+      const close = tick.close ?? (ticks[idx + 1]?.price ?? tick.price);
+      const high = tick.high ?? Math.max(open, close, tick.price);
+      const low = tick.low ?? Math.min(open, close, tick.price);
+
+      return {
+        time: tick.time as UTCTimestamp,
+        open,
+        high,
+        low,
+        close,
+      };
+    });
+  };
+
+  const updateVisibleSeries = (index: number) => {
+    if (!seriesRef.current) return;
+
+    const endIndex = Math.min(index + 1, candleCacheRef.current.length);
+    const visible = candleCacheRef.current.slice(0, endIndex);
+    seriesRef.current.setData(visible);
+  };
+
+  const applyMarkers = (trade: Trade, ticks: TickData[]) => {
+    if (!seriesRef.current || ticks.length === 0) return;
+
+    const entryMarker: SeriesMarker<UTCTimestamp> = {
+      time: ticks[0].time as UTCTimestamp,
+      position: trade.trade_type === 'long' ? 'belowBar' : 'aboveBar',
       color: '#3b82f6',
-      shape: 'arrowUp' as const,
+      shape: trade.trade_type === 'long' ? 'arrowUp' : 'arrowDown',
       text: `Entry: $${trade.entry_price.toFixed(2)}`,
     };
 
-    const exitMarker = trade.exit_price ? {
-      time: ticks[ticks.length - 1].time,
-      position: trade.trade_type === 'long' ? 'aboveBar' : 'belowBar' as const,
-      color: trade.pnl >= 0 ? '#10b981' : '#ef4444',
-      shape: 'arrowDown' as const,
-      text: `Exit: $${trade.exit_price.toFixed(2)}`,
-    } : null;
+    const exitMarker: SeriesMarker<UTCTimestamp> | null = trade.exit_price
+      ? {
+          time: ticks[ticks.length - 1].time as UTCTimestamp,
+          position: trade.trade_type === 'long' ? 'aboveBar' : 'belowBar',
+          color: trade.pnl >= 0 ? '#10b981' : '#ef4444',
+          shape: trade.trade_type === 'long' ? 'arrowDown' : 'arrowUp',
+          text: `Exit: $${trade.exit_price.toFixed(2)}`,
+        }
+      : null;
 
-    const markers = exitMarker ? [entryMarker, exitMarker] : [entryMarker];
-    candlestickSeries.setMarkers(markers);
+    const markers: SeriesMarker<UTCTimestamp>[] = exitMarker ? [entryMarker, exitMarker] : [entryMarker];
+    seriesRef.current.setMarkers(markers);
+  };
 
-    chart.timeScale().fitContent();
+  const fetchMarketTicks = async (trade: Trade): Promise<{ ticks: TickData[]; source: 'provider' | 'synthetic' }> => {
+    try {
+      const entryTime = new Date(trade.entry_date).getTime();
+      const exitTime = trade.exit_date ? new Date(trade.exit_date).getTime() : entryTime + MARKET_DATA_PADDING_MS;
+      const from = new Date(entryTime - MARKET_DATA_PADDING_MS).toISOString();
+      const to = new Date(exitTime + MARKET_DATA_PADDING_MS).toISOString();
 
-    chartRef.current = chart;
-    seriesRef.current = candlestickSeries;
+      const params = new URLSearchParams({
+        symbol: trade.symbol,
+        from,
+        to,
+        tf: '1m',
+      });
+
+      const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/fetch-market-data?${params.toString()}`;
+      const response = await fetch(apiUrl, {
+        headers: {
+          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+        },
+      });
+
+      if (!response.ok) {
+        console.warn('Market data request failed with status', response.status);
+        return { ticks: [], source: 'synthetic' };
+      }
+
+      const payload = (await response.json()) as MarketDataResponse;
+      const bars = Array.isArray(payload?.data) ? payload.data : [];
+
+      if (!bars.length) {
+        return { ticks: [], source: 'synthetic' };
+      }
+
+      const ticks: TickData[] = bars.map(bar => ({
+        time: bar.time,
+        price: bar.close,
+        volume: bar.volume,
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+      }));
+
+      return { ticks, source: payload?.source === 'polygon' ? 'provider' : 'synthetic' };
+    } catch (error) {
+      console.error('Failed to fetch market data:', error);
+      return { ticks: [], source: 'synthetic' };
+    }
+  };
+
+  const generateSyntheticTickData = (trade: Trade): TickData[] => {
+    const entryTime = new Date(trade.entry_date).getTime();
+    const exitTime = trade.exit_date ? new Date(trade.exit_date).getTime() : entryTime + 3600000;
+    const duration = exitTime - entryTime;
+    const numTicks = Math.min(Math.max(Math.floor(duration / 1000), 50), 500);
+
+    const ticks: TickData[] = [];
+    const priceRange = Math.abs((trade.exit_price || trade.entry_price) - trade.entry_price);
+    const volatility = priceRange * 0.3 || trade.entry_price * 0.01;
+
+    let currentPrice = trade.entry_price;
+    const priceStep = ((trade.exit_price || trade.entry_price) - trade.entry_price) / numTicks;
+
+    for (let i = 0; i <= numTicks; i++) {
+      const time = entryTime + (duration * i) / numTicks;
+      const noise = (Math.random() - 0.5) * volatility * 0.3;
+      const nextPrice = trade.entry_price + priceStep * i + noise;
+
+      const open = currentPrice;
+      const close = nextPrice;
+      const high = Math.max(open, close) + Math.random() * volatility * 0.1;
+      const low = Math.min(open, close) - Math.random() * volatility * 0.1;
+
+      ticks.push({
+        time: Math.floor(time / 1000),
+        price: Number(close.toFixed(2)),
+        volume: Math.floor(Math.random() * 1000) + 100,
+        open: Number(open.toFixed(2)),
+        high: Number(high.toFixed(2)),
+        low: Number(low.toFixed(2)),
+        close: Number(close.toFixed(2)),
+      });
+
+      currentPrice = nextPrice;
+    }
+
+    return ticks;
+  };
+
+  const selectTrade = async (trade: Trade) => {
+    setSelectedTrade(trade);
+    setCurrentTick(0);
+    setIsPlaying(false);
+    setInsights('');
+    setLoading(true);
+
+    try {
+      const { data: replayData, error } = await supabase
+        .from('trade_replays')
+        .select('*')
+        .eq('trade_id', trade.id)
+        .maybeSingle();
+
+      if (error && error.code !== 'PGRST116') {
+        throw error;
+      }
+
+      let ticks: TickData[] = [];
+      let aiInsights = replayData?.replay_insights || '';
+      let source: 'provider' | 'synthetic' = (replayData?.data_source as 'provider' | 'synthetic') || 'synthetic';
+
+      if (replayData?.tick_data?.length) {
+        ticks = replayData.tick_data as TickData[];
+        await supabase
+          .from('trade_replays')
+          .update({ times_viewed: (replayData.times_viewed || 0) + 1 })
+          .eq('id', replayData.id);
+      }
+
+      if (ticks.length === 0 || source === 'synthetic') {
+        const marketResult = await fetchMarketTicks(trade);
+        if (marketResult.ticks.length) {
+          ticks = marketResult.ticks;
+          source = marketResult.source;
+        }
+      }
+
+      if (ticks.length === 0) {
+        ticks = generateSyntheticTickData(trade);
+        source = 'synthetic';
+      }
+
+      if (!aiInsights) {
+        aiInsights = generateInsights(trade, ticks);
+      }
+
+      if (replayData) {
+        await supabase
+          .from('trade_replays')
+          .update({
+            tick_data: ticks,
+            replay_insights: aiInsights,
+            data_source: source === 'provider' ? 'provider' : 'synthetic',
+            times_viewed: (replayData.times_viewed || 0) + 1,
+          })
+          .eq('id', replayData.id);
+      } else {
+        await supabase.from('trade_replays').insert({
+          trade_id: trade.id,
+          user_id: user!.id,
+          tick_data: ticks,
+          replay_insights: aiInsights,
+          times_viewed: 1,
+          data_source: source === 'provider' ? 'provider' : 'synthetic',
+        });
+      }
+
+      setTickData(ticks);
+      setDataSource(source);
+      setInsights(aiInsights);
+
+      if (!trade.replay_reviewed) {
+        const { error: updateError } = await supabase
+          .from('trades')
+          .update({ replay_reviewed: true })
+          .eq('id', trade.id);
+
+        if (updateError) {
+          console.error('Failed to update trade replay status:', updateError);
+        } else {
+          await awardXpEvent(user!.id, 'replay_review', REPLAY_XP_VALUE, {
+            referenceId: trade.id,
+            metadata: { symbol: trade.symbol },
+          });
+          await checkReplayBadge();
+        }
+      }
+    } catch (err) {
+      console.error('Error loading replay:', err);
+      const fallbackTicks = generateSyntheticTickData(trade);
+      setTickData(fallbackTicks);
+      setInsights(generateInsights(trade, fallbackTicks));
+      setDataSource('synthetic');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const generateInsights = (trade: Trade, ticks: TickData[]): string => {
+    const pnlPercent = ((trade.pnl / (trade.entry_price * trade.quantity)) * 100).toFixed(2);
+
+    let insightsText = `Trade Performance: ${trade.pnl >= 0 ? 'Profit' : 'Loss'} of $${Math.abs(trade.pnl).toFixed(2)} (${pnlPercent}%)\n\n`;
+
+    const optimalEntryPrice = Math.min(...ticks.slice(0, Math.max(1, Math.floor(ticks.length * 0.2))).map(t => t.price));
+    const entryDiff = Math.abs(trade.entry_price - optimalEntryPrice);
+
+    if (entryDiff > trade.entry_price * 0.001) {
+      insightsText += `⚠️ Entry Timing: Missed optimal entry by ${entryDiff.toFixed(2)} points. Could have entered at ${optimalEntryPrice.toFixed(2)} instead of ${trade.entry_price.toFixed(2)}.\n\n`;
+    } else {
+      insightsText += '✅ Entry Timing: Good entry near optimal price.\n\n';
+    }
+
+    const prices = ticks.map(t => t.price);
+    const maxAdverse = trade.trade_type === 'long' ? Math.min(...prices) : Math.max(...prices);
+    const maxFavorable = trade.trade_type === 'long' ? Math.max(...prices) : Math.min(...prices);
+
+    insightsText += `📊 Max Adverse: ${maxAdverse.toFixed(2)} | Max Favorable: ${maxFavorable.toFixed(2)}\n\n`;
+
+    if (trade.pnl < 0 && trade.exit_price) {
+      insightsText += '💡 Tip: Consider using a stop loss. This trade moved against you significantly.\n';
+    }
+
+    return insightsText;
   };
 
   const checkReplayBadge = async () => {
-    const { data: reviewedCount } = await supabase
-      .from('trades')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', user!.id)
-      .eq('replay_reviewed', true);
+    try {
+      const { count, error } = await supabase
+        .from('trades')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', user!.id)
+        .eq('replay_reviewed', true);
 
-    if (reviewedCount && reviewedCount >= 5) {
-      await supabase.from('gamification').upsert({
-        user_id: user!.id,
-        achievement: 'replay_master',
-        achievement_data: { reviewed_count: reviewedCount }
-      }, { onConflict: 'user_id,achievement' });
+      if (error) {
+        console.error('Failed to count reviewed replays:', error);
+        return;
+      }
+
+      if ((count ?? 0) >= 10) {
+        const { data: gamData } = await supabase
+          .from('gamification')
+          .select('badges')
+          .eq('user_id', user!.id)
+          .maybeSingle();
+
+        const badges = Array.isArray(gamData?.badges) ? [...(gamData?.badges as any[])] : [];
+        const alreadyEarned = badges.some((badge: any) => badge?.id === 'replay_novice');
+
+        if (!alreadyEarned) {
+          badges.push({ id: 'replay_novice', earned_at: new Date().toISOString(), reviewed_count: count });
+          const { error: badgeError } = await supabase
+            .from('gamification')
+            .upsert(
+              {
+                user_id: user!.id,
+                badges,
+              },
+              { onConflict: 'user_id' }
+            );
+
+          if (badgeError) {
+            console.error('Failed to upsert replay badge:', badgeError);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Failed to check replay badge:', error);
     }
   };
 
   const togglePlayPause = () => {
-    if (isPlaying) {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      setIsPlaying(false);
-    } else {
-      setIsPlaying(true);
-      intervalRef.current = setInterval(() => {
-        setCurrentTick(prev => {
-          if (prev >= tickData.length - 1) {
-            setIsPlaying(false);
-            if (intervalRef.current) clearInterval(intervalRef.current);
-            return prev;
-          }
-          return prev + 1;
-        });
-      }, 100 / speed);
-    }
+    setIsPlaying(prev => !prev);
   };
 
   const resetReplay = () => {
+    stopPlayback();
     setCurrentTick(0);
-    setIsPlaying(false);
-    if (intervalRef.current) clearInterval(intervalRef.current);
+    updateVisibleSeries(0);
   };
-
-  useEffect(() => {
-    if (chartRef.current && seriesRef.current && tickData.length > 0) {
-      const visibleData = tickData.slice(0, currentTick + 1).map((tick, idx) => {
-        const nextTick = tickData[idx + 1] || tick;
-        return {
-          time: tick.time,
-          open: tick.price,
-          high: Math.max(tick.price, nextTick.price) + Math.random() * 0.5,
-          low: Math.min(tick.price, nextTick.price) - Math.random() * 0.5,
-          close: nextTick.price,
-        };
-      });
-      seriesRef.current.setData(visibleData);
-    }
-  }, [currentTick, tickData]);
 
   const formatDuration = (ms: number) => {
     const seconds = Math.floor(ms / 1000);
@@ -359,11 +614,13 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
                   <div className="flex-1">
                     <div className="flex items-center space-x-3">
                       <span className="text-lg font-bold text-gray-900 dark:text-white">{trade.symbol}</span>
-                      <span className={`px-2 py-1 rounded text-xs font-medium ${
-                        trade.trade_type === 'long'
-                          ? 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300'
-                          : 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300'
-                      }`}>
+                      <span
+                        className={`px-2 py-1 rounded text-xs font-medium ${
+                          trade.trade_type === 'long'
+                            ? 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300'
+                            : 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300'
+                        }`}
+                      >
                         {trade.trade_type.toUpperCase()}
                       </span>
                       {trade.replay_reviewed && (
@@ -379,9 +636,11 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
                     </div>
                   </div>
                   <div className="text-right">
-                    <div className={`text-xl font-bold ${
-                      trade.pnl >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
-                    }`}>
+                    <div
+                      className={`text-xl font-bold ${
+                        trade.pnl >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
+                      }`}
+                    >
                       {trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}
                     </div>
                     <div className="text-sm text-gray-600 dark:text-gray-400">
@@ -410,29 +669,36 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
           <div>
             <h2 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center space-x-3">
               <span>{selectedTrade.symbol}</span>
-              <span className={`px-3 py-1 rounded-lg text-sm font-medium ${
-                selectedTrade.trade_type === 'long'
-                  ? 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300'
-                  : 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300'
-              }`}>
+              <span
+                className={`px-3 py-1 rounded-lg text-sm font-medium ${
+                  selectedTrade.trade_type === 'long'
+                    ? 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300'
+                    : 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300'
+                }`}
+              >
                 {selectedTrade.trade_type.toUpperCase()}
               </span>
             </h2>
             <p className="text-gray-600 dark:text-gray-400">
               {new Date(selectedTrade.entry_date).toLocaleString()}
             </p>
+            <p className="text-xs text-gray-500 dark:text-gray-500 mt-1">
+              Data source: {dataSource === 'provider' ? 'Live market data' : 'Synthetic playback'}
+            </p>
           </div>
         </div>
-        <div className={`text-3xl font-bold ${
-          selectedTrade.pnl >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
-        }`}>
+        <div
+          className={`text-3xl font-bold ${
+            selectedTrade.pnl >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
+          }`}
+        >
           {selectedTrade.pnl >= 0 ? '+' : ''}${selectedTrade.pnl.toFixed(2)}
         </div>
       </div>
 
       {loading ? (
         <div className="bg-white dark:bg-gray-800 rounded-lg p-12 text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-emerald-500 mx-auto"></div>
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-emerald-500 mx-auto" />
           <p className="mt-4 text-gray-600 dark:text-gray-400">Loading replay data...</p>
         </div>
       ) : (
@@ -458,7 +724,7 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
                 <Gauge className="w-4 h-4 text-gray-600 dark:text-gray-400" />
                 <select
                   value={speed}
-                  onChange={(e) => setSpeed(Number(e.target.value))}
+                  onChange={event => setSpeed(Number(event.target.value))}
                   className="px-3 py-2 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-sm"
                 >
                   <option value={0.5}>0.5x</option>
@@ -469,7 +735,7 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
                 </select>
               </div>
               <div className="text-sm text-gray-600 dark:text-gray-400">
-                Tick {currentTick + 1} / {tickData.length}
+                Tick {Math.min(currentTick + 1, tickData.length)} / {tickData.length}
               </div>
             </div>
           </div>
@@ -506,10 +772,12 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
               </div>
             </div>
             <div className="bg-white dark:bg-gray-800 rounded-lg p-4 border border-gray-200 dark:border-gray-700">
-              <div className="text-sm text-gray-600 dark:text-gray-400">P&L</div>
-              <div className={`text-2xl font-bold mt-1 ${
-                selectedTrade.pnl >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
-              }`}>
+              <div className="text-sm text-gray-600 dark:text-gray-400">P&amp;L</div>
+              <div
+                className={`text-2xl font-bold mt-1 ${
+                  selectedTrade.pnl >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
+                }`}
+              >
                 {selectedTrade.pnl >= 0 ? '+' : ''}${selectedTrade.pnl.toFixed(2)}
               </div>
             </div>
@@ -517,17 +785,20 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
 
           {tickData[currentTick] && (
             <div className="bg-gray-50 dark:bg-gray-900 rounded-lg p-4 border border-gray-200 dark:border-gray-700">
-              <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-2">Time & Sales</h3>
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-2">Time &amp; Sales</h3>
               <div className="space-y-1 font-mono text-sm">
-                {tickData.slice(Math.max(0, currentTick - 5), currentTick + 1).reverse().map((tick, idx) => (
-                  <div key={idx} className="flex justify-between text-gray-700 dark:text-gray-300">
-                    <span>{new Date(tick.time * 1000).toLocaleTimeString()}</span>
-                    <span className={idx === 0 ? 'font-bold text-emerald-600 dark:text-emerald-400' : ''}>
-                      ${tick.price.toFixed(2)}
-                    </span>
-                    <span className="text-gray-500">{tick.volume}</span>
-                  </div>
-                ))}
+                {tickData
+                  .slice(Math.max(0, currentTick - 5), currentTick + 1)
+                  .reverse()
+                  .map((tick, idx) => (
+                    <div key={`${tick.time}-${idx}`} className="flex justify-between text-gray-700 dark:text-gray-300">
+                      <span>{new Date(tick.time * 1000).toLocaleTimeString()}</span>
+                      <span className={idx === 0 ? 'font-bold text-emerald-600 dark:text-emerald-400' : ''}>
+                        ${tick.price.toFixed(2)}
+                      </span>
+                      <span className="text-gray-500">{tick.volume}</span>
+                    </div>
+                  ))}
               </div>
             </div>
           )}
