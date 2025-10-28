@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "NodeNext",
+    "moduleResolution": "nodenext",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "strict": true,
+    "baseUrl": ".",
+    "paths": {
+      "npm:@supabase/supabase-js": ["../node_modules/@supabase/supabase-js/dist/module/index.d.ts"],
+      "npm:@supabase/supabase-js@*": ["../node_modules/@supabase/supabase-js/dist/module/index.d.ts"]
+    }
+  },
+  "include": ["functions/**/*.ts", "types/**/*.d.ts"]
+}
