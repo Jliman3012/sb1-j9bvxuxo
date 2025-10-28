@@ -11,6 +11,7 @@ export interface TargetFormat {
   FilledAt: string;
   CancelledAt: string;
   StopPrice: string;
+  RiskAmount: string;
   LimitPrice: string;
   ExecutePrice: string;
   PositionDisposition: string;
@@ -37,6 +38,7 @@ const COLUMN_MAPPINGS: ColumnMapping = {
   FilledAt: ['filled_at', 'filledat', 'filled', 'execution_time', 'fill_time', 'executed_at', 'exitedat', 'exited_at'],
   CancelledAt: ['cancelled_at', 'cancelledat', 'cancelled', 'cancel_time'],
   StopPrice: ['stop_price', 'stopprice', 'stop', 'stop_loss', 'stoploss'],
+  RiskAmount: ['risk', 'risk_amount', 'initial_risk', 'riskamount', 'riskusd', 'risk_amt', 'risk_per_trade', 'risk$'],
   LimitPrice: ['limit_price', 'limitprice', 'limit', 'limit_order'],
   ExecutePrice: ['execute_price', 'executeprice', 'execution_price', 'fill_price', 'fillprice', 'price', 'avg_price', 'avgprice', 'entryprice', 'entry_price', 'exitprice', 'exit_price'],
   PositionDisposition: ['position_disposition', 'position', 'position_type'],
@@ -239,7 +241,7 @@ export function normalizeCSV(csvText: string): { normalized: string; stats: { ro
 
   const targetHeadersOrdered = [
     'Id', 'AccountName', 'ContractName', 'Status', 'Type', 'Size', 'Side',
-    'CreatedAt', 'TradeDay', 'FilledAt', 'CancelledAt', 'StopPrice', 'LimitPrice',
+    'CreatedAt', 'TradeDay', 'FilledAt', 'CancelledAt', 'StopPrice', 'RiskAmount', 'LimitPrice',
     'ExecutePrice', 'PositionDisposition', 'CreationDisposition', 'RejectionReason',
     'ExchangeOrderId', 'PlatformOrderId'
   ];

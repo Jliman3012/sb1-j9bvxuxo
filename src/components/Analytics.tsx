@@ -61,6 +61,34 @@ export default function Analytics() {
     avgHoldingTime: 0,
   };
 
+  const rMultipleSummary = trades.reduce((acc, trade) => {
+    let value: number | null = null;
+    if (trade.r_multiple !== null && trade.r_multiple !== undefined && !Number.isNaN(Number(trade.r_multiple))) {
+      value = Number(trade.r_multiple);
+    } else if (trade.initial_risk && trade.initial_risk !== 0) {
+      value = Number(trade.pnl) / Number(trade.initial_risk);
+    } else if (trade.stop_price && trade.entry_price && trade.quantity) {
+      const priceDiff = trade.trade_type === 'long'
+        ? Number(trade.entry_price) - Number(trade.stop_price)
+        : Number(trade.stop_price) - Number(trade.entry_price);
+      if (priceDiff > 0) {
+        const risk = Math.abs(priceDiff * Number(trade.quantity));
+        if (risk > 0) {
+          value = Number(trade.pnl) / risk;
+        }
+      }
+    }
+
+    if (value !== null && !Number.isNaN(value) && Number.isFinite(value)) {
+      acc.sum += value;
+      acc.count += 1;
+    }
+
+    return acc;
+  }, { sum: 0, count: 0 });
+
+  const avgRMultiple = rMultipleSummary.count > 0 ? rMultipleSummary.sum / rMultipleSummary.count : 0;
+
   const totalWins = winningTrades.reduce((sum, t) => sum + Number(t.pnl), 0);
   const totalLosses = Math.abs(losingTrades.reduce((sum, t) => sum + Number(t.pnl), 0));
   stats.profitFactor = totalLosses > 0 ? totalWins / totalLosses : 0;
@@ -108,7 +136,7 @@ export default function Analytics() {
         <h1 className="text-3xl font-bold text-gray-900">Analytics</h1>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
         <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
           <div className="flex items-center justify-between mb-2">
             <span className="text-sm text-gray-600">Profit Factor</span>
@@ -139,6 +167,15 @@ export default function Analytics() {
             <Calendar className="w-5 h-5 text-slate-600" />
           </div>
           <p className="text-2xl font-bold text-gray-900">{stats.avgHoldingTime.toFixed(1)}h</p>
+        </div>
+
+        <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm text-gray-600">Avg R-Multiple</span>
+            <Target className="w-5 h-5 text-purple-600" />
+          </div>
+          <p className="text-2xl font-bold text-gray-900">{avgRMultiple.toFixed(2)}</p>
+          <p className="text-xs text-gray-500 mt-1">Across {rMultipleSummary.count} risk-defined trades</p>
         </div>
       </div>
 

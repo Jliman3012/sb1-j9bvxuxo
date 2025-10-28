@@ -50,6 +50,18 @@ export async function calculateProgressMetrics(userId: string): Promise<Progress
     const disciplineScore = calculateDisciplineScore(trades);
     const consistencyScore = calculateConsistencyScore(completedTrades);
 
+    const { data: xpEvents, error: xpEventsError } = await supabase
+      .from('gamification_events')
+      .select('xp_value')
+      .eq('user_id', userId);
+
+    if (xpEventsError) {
+      console.error('Error loading gamification events:', xpEventsError);
+    }
+
+    const bonusXp = xpEvents?.reduce((sum, event) => sum + (event.xp_value || 0), 0) ?? 0;
+    xp += bonusXp;
+
     const level = Math.floor(xp / 1000) + 1;
 
     const badges = calculateBadges(trades, completedTrades, winningTrades, currentStreak, longestStreak);

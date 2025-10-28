@@ -103,6 +103,11 @@ export type Trade = {
   status: 'open' | 'closed';
   notes?: string;
   tags?: string[];
+  stop_price?: number | null;
+  initial_risk?: number | null;
+  r_multiple?: number | null;
+  journal_data?: Record<string, any> | null;
+  replay_reviewed?: boolean;
   created_at: string;
   updated_at: string;
 };
