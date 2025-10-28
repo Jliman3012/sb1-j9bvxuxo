@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import Auth from './components/Auth';
 import Layout from './components/Layout';
@@ -19,11 +19,24 @@ import AdvancedAnalytics from './components/AdvancedAnalytics';
 import GoalsTracker from './components/GoalsTracker';
 import WeeklyReport from './components/WeeklyReport';
 import TradeReplay from './components/TradeReplay';
+import { supabase } from './lib/supabase';
 
 function AppContent() {
   const { user, loading } = useAuth();
   const [currentPage, setCurrentPage] = useState('dashboard');
   const [pageData, setPageData] = useState<any>(null);
+
+  useEffect(() => {
+    supabase
+      .from('profiles')
+      .select('*')
+      .then((result) => {
+        console.log('Supabase connection check:', result);
+      })
+      .catch((error) => {
+        console.error('Supabase connection failed:', error);
+      });
+  }, []);
 
   if (loading) {
     return (
