@@ -1,8 +1,14 @@
 import { useState, useEffect, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
-import { Play, Pause, RotateCcw, ChevronLeft, Gauge, TrendingUp, TrendingDown, Clock } from 'lucide-react';
-import { createChart, IChartApi, ISeriesApi } from 'lightweight-charts';
+import { Play, Pause, RotateCcw, ChevronLeft, Gauge, TrendingUp, Clock } from 'lucide-react';
+import {
+  createChart,
+  IChartApi,
+  ISeriesApi,
+  type CandlestickData,
+  type SeriesMarker,
+} from 'lightweight-charts';
 
 interface Trade {
   id: string;
@@ -42,21 +48,35 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const badgeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const candleDataRef = useRef<CandlestickData[]>([]);
 
   useEffect(() => {
     loadTrades();
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      if (chartRef.current) chartRef.current.remove();
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      if (badgeTimeoutRef.current) {
+        clearTimeout(badgeTimeoutRef.current);
+        badgeTimeoutRef.current = null;
+      }
+      if (chartRef.current) {
+        chartRef.current.remove();
+        chartRef.current = null;
+        seriesRef.current = null;
+      }
     };
   }, []);
 
   const loadTrades = async () => {
+    if (!user) return;
     try {
       const { data, error } = await supabase
         .from('trades')
         .select('*')
-        .eq('user_id', user!.id)
+        .eq('user_id', user.id)
         .not('exit_date', 'is', null)
         .order('entry_date', { ascending: false })
         .limit(50);
@@ -71,7 +91,7 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
   const generateSyntheticTickData = (trade: Trade): TickData[] => {
     const entryTime = new Date(trade.entry_date).getTime();
     const exitTime = trade.exit_date ? new Date(trade.exit_date).getTime() : entryTime + 3600000;
-    const duration = exitTime - entryTime;
+    const duration = Math.max(exitTime - entryTime, 1);
     const numTicks = Math.min(Math.max(Math.floor(duration / 1000), 50), 500);
 
     const ticks: TickData[] = [];
@@ -79,24 +99,80 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
     const volatility = priceRange * 0.3;
 
     let currentPrice = trade.entry_price;
-    const priceStep = ((trade.exit_price || trade.entry_price) - trade.entry_price) / numTicks;
+    const priceStep = numTicks > 0
+      ? ((trade.exit_price || trade.entry_price) - trade.entry_price) / numTicks
+      : 0;
 
-    for (let i = 0; i <= numTicks; i++) {
-      const time = entryTime + (duration * i / numTicks);
+    for (let i = 0; i <= Math.max(numTicks, 1); i++) {
+      const ratio = numTicks > 0 ? i / numTicks : 0;
+      const time = entryTime + (duration * ratio);
       const noise = (Math.random() - 0.5) * volatility * 0.3;
       currentPrice = trade.entry_price + (priceStep * i) + noise;
 
       ticks.push({
         time: Math.floor(time / 1000),
         price: parseFloat(currentPrice.toFixed(2)),
-        volume: Math.floor(Math.random() * 1000) + 100
+        volume: Math.floor(Math.random() * 1000) + 100,
       });
     }
 
     return ticks;
   };
 
+  const fetchMarketDataTicks = async (trade: Trade): Promise<TickData[] | null> => {
+    if (!user) return null;
+    try {
+      const entry = new Date(trade.entry_date).getTime();
+      const exit = trade.exit_date ? new Date(trade.exit_date).getTime() : entry + 3600000;
+      const padding = 60 * 60 * 1000;
+
+      const from = new Date(entry - padding).toISOString();
+      const to = new Date(exit + padding).toISOString();
+
+      const { data, error } = await supabase.functions.invoke('fetch-market-data', {
+        body: {
+          symbol: trade.symbol,
+          from,
+          to,
+          timeframe: '1m',
+        },
+      });
+
+      if (error) {
+        console.error('Error invoking market data function:', error);
+        return null;
+      }
+
+      if (!data || !Array.isArray((data as any).data)) {
+        return null;
+      }
+
+      const bars = (data as { data: Array<{ time: string; close: number; volume?: number }> }).data;
+
+      const ticks = bars
+        .map((bar) => {
+          const time = new Date(bar.time).getTime();
+          if (!Number.isFinite(time) || Number.isNaN(time)) {
+            return null;
+          }
+
+          return {
+            time: Math.floor(time / 1000),
+            price: Number.isFinite(bar.close) ? Number(bar.close) : trade.entry_price,
+            volume: Number.isFinite(bar.volume ?? 0) ? Number(bar.volume ?? 0) : 0,
+          } satisfies TickData;
+        })
+        .filter((tick): tick is TickData => Boolean(tick));
+
+      return ticks.length > 0 ? ticks : null;
+    } catch (err) {
+      console.error('Failed to fetch real market data:', err);
+      return null;
+    }
+  };
+
   const selectTrade = async (trade: Trade) => {
+    if (!user) return;
     setSelectedTrade(trade);
     setCurrentTick(0);
     setIsPlaying(false);
@@ -121,21 +197,23 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
           .update({ times_viewed: (replayData.times_viewed || 0) + 1 })
           .eq('id', replayData.id);
       } else {
-        ticks = generateSyntheticTickData(trade);
+        const realTicks = await fetchMarketDataTicks(trade);
+        ticks = realTicks ?? generateSyntheticTickData(trade);
         aiInsights = generateInsights(trade, ticks);
 
-        await supabase.from('trade_replays').insert({
-          trade_id: trade.id,
-          user_id: user!.id,
-          tick_data: ticks,
-          replay_insights: aiInsights,
-          times_viewed: 1
-        });
+        await supabase
+          .from('trade_replays')
+          .upsert({
+            trade_id: trade.id,
+            user_id: user!.id,
+            tick_data: ticks,
+            replay_insights: aiInsights,
+            times_viewed: 1,
+          }, { onConflict: 'trade_id' });
       }
 
       setTickData(ticks);
       setInsights(aiInsights);
-      initializeChart(ticks, trade);
 
       if (!trade.replay_reviewed) {
         await supabase
@@ -143,7 +221,21 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
           .update({ replay_reviewed: true })
           .eq('id', trade.id);
 
-        await checkReplayBadge();
+        setTrades(prev => prev.map(t => t.id === trade.id ? { ...t, replay_reviewed: true } : t));
+        setSelectedTrade(prev => prev ? { ...prev, replay_reviewed: true } : prev);
+
+        if (badgeTimeoutRef.current) {
+          clearTimeout(badgeTimeoutRef.current);
+        }
+
+        badgeTimeoutRef.current = setTimeout(() => {
+          checkReplayBadge().catch((err) => {
+            console.error('Badge check failed:', err);
+          });
+          awardReplayXP(trade).catch((err) => {
+            console.error('Failed to award replay XP:', err);
+          });
+        }, 300);
       }
     } catch (err) {
       console.error('Error loading replay:', err);
@@ -153,9 +245,12 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
   };
 
   const generateInsights = (trade: Trade, ticks: TickData[]): string => {
-    const entryIndex = 0;
-    const exitIndex = ticks.length - 1;
-    const optimalEntryPrice = Math.min(...ticks.slice(0, Math.floor(ticks.length * 0.2)).map(t => t.price));
+    if (ticks.length === 0) {
+      return 'Replay data unavailable for this trade. Try fetching market data again soon.';
+    }
+
+    const leadingTicks = ticks.slice(0, Math.max(1, Math.floor(ticks.length * 0.2)));
+    const optimalEntryPrice = Math.min(...leadingTicks.map(t => t.price));
     const entryDiff = Math.abs(trade.entry_price - optimalEntryPrice);
     const pnlPercent = ((trade.pnl / (trade.entry_price * trade.quantity)) * 100).toFixed(2);
 
@@ -184,11 +279,158 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
     return insights;
   };
 
-  const initializeChart = (ticks: TickData[], trade: Trade) => {
-    if (!chartContainerRef.current) return;
+  const buildCandleData = (ticks: TickData[]): CandlestickData[] => {
+    if (ticks.length === 0) return [];
 
-    if (chartRef.current) {
-      chartRef.current.remove();
+    return ticks.map((tick, idx) => {
+      const nextTick = ticks[idx + 1] || tick;
+      const high = Math.max(tick.price, nextTick.price);
+      const low = Math.min(tick.price, nextTick.price);
+
+      return {
+        time: tick.time,
+        open: tick.price,
+        high: high + Math.random() * 0.1,
+        low: low - Math.random() * 0.1,
+        close: nextTick.price,
+      } satisfies CandlestickData;
+    });
+  };
+
+  const checkReplayBadge = async () => {
+    if (!user) return;
+
+    const { count, error } = await supabase
+      .from('trades')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', user.id)
+      .eq('replay_reviewed', true);
+
+    if (error) throw error;
+
+    if ((count ?? 0) >= 5) {
+      const { data: gamificationRow, error: fetchError } = await supabase
+        .from('gamification')
+        .select('badges, achievements')
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+      if (fetchError) {
+        throw fetchError;
+      }
+
+      const badges = Array.isArray(gamificationRow?.badges) ? [...gamificationRow.badges] : [];
+      if (!badges.some(badge => badge?.id === 'replay_master')) {
+        badges.push({ id: 'replay_master', earned_at: new Date().toISOString(), reviewed_count: count ?? 0 });
+
+        const { error: updateError } = await supabase
+          .from('gamification')
+          .upsert({
+            user_id: user.id,
+            badges,
+            achievements: gamificationRow?.achievements ?? [],
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'user_id' });
+
+        if (updateError) {
+          throw updateError;
+        }
+      }
+    }
+  };
+
+  const awardReplayXP = async (trade: Trade) => {
+    if (!user) return;
+
+    try {
+      const { error: eventError } = await supabase
+        .from('gamification_events')
+        .insert({
+          user_id: user.id,
+          event_type: 'replay_review',
+          xp_awarded: 10,
+          metadata: { trade_id: trade.id },
+        });
+
+      if (eventError) {
+        console.warn('Unable to log gamification event:', eventError.message);
+      }
+    } catch (eventInsertError) {
+      console.warn('Gamification events logging unavailable:', eventInsertError);
+    }
+
+    const { data: gamificationRow, error } = await supabase
+      .from('gamification')
+      .select('total_xp, current_level')
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+    if (error) {
+      throw error;
+    }
+
+    const totalXP = (gamificationRow?.total_xp ?? 0) + 10;
+    const currentLevel = Math.floor(totalXP / 1000) + 1;
+
+    if (gamificationRow) {
+      const { error: updateError } = await supabase
+        .from('gamification')
+        .update({
+          total_xp: totalXP,
+          current_level: currentLevel,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('user_id', user.id);
+
+      if (updateError) {
+        throw updateError;
+      }
+    } else {
+      const { error: insertError } = await supabase
+        .from('gamification')
+        .insert({
+          user_id: user.id,
+          total_xp: totalXP,
+          current_level: currentLevel,
+        });
+
+      if (insertError) {
+        throw insertError;
+      }
+    }
+  };
+
+  const togglePlayPause = () => {
+    setIsPlaying(prev => {
+      if (prev && intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      return !prev;
+    });
+  };
+
+  const resetReplay = () => {
+    setCurrentTick(0);
+    setIsPlaying(false);
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedTrade) {
+      if (chartRef.current) {
+        chartRef.current.remove();
+        chartRef.current = null;
+        seriesRef.current = null;
+      }
+      return;
+    }
+
+    if (!chartContainerRef.current) {
+      return;
     }
 
     const chart = createChart(chartContainerRef.current, {
@@ -217,100 +459,97 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
       wickDownColor: '#ef4444',
     });
 
-    const candleData = ticks.map((tick, idx) => {
-      const nextTick = ticks[idx + 1] || tick;
-      return {
-        time: tick.time,
-        open: tick.price,
-        high: Math.max(tick.price, nextTick.price) + Math.random() * 0.5,
-        low: Math.min(tick.price, nextTick.price) - Math.random() * 0.5,
-        close: nextTick.price,
-      };
-    });
-
-    candlestickSeries.setData(candleData);
-
-    const entryMarker = {
-      time: ticks[0].time,
-      position: trade.trade_type === 'long' ? 'belowBar' : 'aboveBar' as const,
-      color: '#3b82f6',
-      shape: 'arrowUp' as const,
-      text: `Entry: $${trade.entry_price.toFixed(2)}`,
-    };
-
-    const exitMarker = trade.exit_price ? {
-      time: ticks[ticks.length - 1].time,
-      position: trade.trade_type === 'long' ? 'aboveBar' : 'belowBar' as const,
-      color: trade.pnl >= 0 ? '#10b981' : '#ef4444',
-      shape: 'arrowDown' as const,
-      text: `Exit: $${trade.exit_price.toFixed(2)}`,
-    } : null;
-
-    const markers = exitMarker ? [entryMarker, exitMarker] : [entryMarker];
-    candlestickSeries.setMarkers(markers);
-
-    chart.timeScale().fitContent();
-
     chartRef.current = chart;
     seriesRef.current = candlestickSeries;
-  };
 
-  const checkReplayBadge = async () => {
-    const { data: reviewedCount } = await supabase
-      .from('trades')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', user!.id)
-      .eq('replay_reviewed', true);
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.contentRect.width && chartContainerRef.current) {
+          chart.applyOptions({ width: entry.contentRect.width });
+        }
+      }
+    });
 
-    if (reviewedCount && reviewedCount >= 5) {
-      await supabase.from('gamification').upsert({
-        user_id: user!.id,
-        achievement: 'replay_master',
-        achievement_data: { reviewed_count: reviewedCount }
-      }, { onConflict: 'user_id,achievement' });
-    }
-  };
+    resizeObserver.observe(chartContainerRef.current);
 
-  const togglePlayPause = () => {
-    if (isPlaying) {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      setIsPlaying(false);
-    } else {
-      setIsPlaying(true);
-      intervalRef.current = setInterval(() => {
-        setCurrentTick(prev => {
-          if (prev >= tickData.length - 1) {
-            setIsPlaying(false);
-            if (intervalRef.current) clearInterval(intervalRef.current);
-            return prev;
-          }
-          return prev + 1;
-        });
-      }, 100 / speed);
-    }
-  };
-
-  const resetReplay = () => {
-    setCurrentTick(0);
-    setIsPlaying(false);
-    if (intervalRef.current) clearInterval(intervalRef.current);
-  };
+    return () => {
+      resizeObserver.disconnect();
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      chart.remove();
+      chartRef.current = null;
+      seriesRef.current = null;
+    };
+  }, [selectedTrade]);
 
   useEffect(() => {
-    if (chartRef.current && seriesRef.current && tickData.length > 0) {
-      const visibleData = tickData.slice(0, currentTick + 1).map((tick, idx) => {
-        const nextTick = tickData[idx + 1] || tick;
-        return {
-          time: tick.time,
-          open: tick.price,
-          high: Math.max(tick.price, nextTick.price) + Math.random() * 0.5,
-          low: Math.min(tick.price, nextTick.price) - Math.random() * 0.5,
-          close: nextTick.price,
-        };
-      });
-      seriesRef.current.setData(visibleData);
+    if (!selectedTrade || !seriesRef.current || tickData.length === 0) {
+      return;
     }
-  }, [currentTick, tickData]);
+
+    const candles = buildCandleData(tickData);
+    candleDataRef.current = candles;
+
+    const entryMarker: SeriesMarker<'Candlestick'> = {
+      time: tickData[0].time,
+      position: selectedTrade.trade_type === 'long' ? 'belowBar' : 'aboveBar',
+      color: '#3b82f6',
+      shape: 'arrowUp',
+      text: `Entry: $${selectedTrade.entry_price.toFixed(2)}`,
+    };
+
+    const exitTick = tickData[tickData.length - 1];
+
+    const exitMarker: SeriesMarker<'Candlestick'> | null = selectedTrade.exit_price
+      ? {
+          time: exitTick.time,
+          position: selectedTrade.trade_type === 'long' ? 'aboveBar' : 'belowBar',
+          color: selectedTrade.pnl >= 0 ? '#10b981' : '#ef4444',
+          shape: 'arrowDown',
+          text: `Exit: $${selectedTrade.exit_price.toFixed(2)}`,
+        }
+      : null;
+
+    const markers = exitMarker ? [entryMarker, exitMarker] : [entryMarker];
+
+    seriesRef.current.setMarkers(markers);
+    seriesRef.current.setData(candles.slice(0, currentTick + 1));
+    chartRef.current?.timeScale().fitContent();
+  }, [tickData, selectedTrade]);
+
+  useEffect(() => {
+    if (!seriesRef.current || candleDataRef.current.length === 0) return;
+
+    const visibleData = candleDataRef.current.slice(0, currentTick + 1);
+    seriesRef.current.setData(visibleData.length > 0 ? visibleData : []);
+  }, [currentTick]);
+
+  useEffect(() => {
+    if (!isPlaying) {
+      return;
+    }
+
+    const playbackInterval = setInterval(() => {
+      setCurrentTick(prev => {
+        if (prev >= tickData.length - 1) {
+          setIsPlaying(false);
+          return prev;
+        }
+        return prev + 1;
+      });
+    }, Math.max(50, 200 / speed));
+
+    intervalRef.current = playbackInterval;
+
+    return () => {
+      clearInterval(playbackInterval);
+      if (intervalRef.current === playbackInterval) {
+        intervalRef.current = null;
+      }
+    };
+  }, [isPlaying, speed, tickData.length]);
 
   const formatDuration = (ms: number) => {
     const seconds = Math.floor(ms / 1000);
