@@ -1,7 +1,26 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const DEFAULT_SUPABASE_URL = 'https://trtqfmdjgsgbodpyoucq.supabase.co';
+const DEFAULT_SUPABASE_ANON_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRydHFmbWRqZ3NnYm9kcHlvdWNxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE1OTQxMTUsImV4cCI6MjA3NzE3MDExNX0.qT9vHrz-w5Lh3Fr-wWoz7VkNoDY67sxxmcF03GfEPqM';
+
+const sanitizeEnvValue = (value: unknown) => {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+};
+
+const disableDefaults = sanitizeEnvValue(import.meta.env.VITE_SUPABASE_DISABLE_DEFAULTS) === 'true';
+
+const supabaseUrl =
+  sanitizeEnvValue(import.meta.env.VITE_SUPABASE_URL) ??
+  (disableDefaults ? undefined : DEFAULT_SUPABASE_URL);
+const supabaseAnonKey =
+  sanitizeEnvValue(import.meta.env.VITE_SUPABASE_ANON_KEY) ??
+  (disableDefaults ? undefined : DEFAULT_SUPABASE_ANON_KEY);
 
 let supabaseConfigurationError: Error | null = null;
 

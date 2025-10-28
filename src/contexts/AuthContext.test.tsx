@@ -14,6 +14,7 @@ describe('AuthProvider', () => {
     vi.resetModules();
     vi.stubEnv('VITE_SUPABASE_URL', '');
     vi.stubEnv('VITE_SUPABASE_ANON_KEY', '');
+    vi.stubEnv('VITE_SUPABASE_DISABLE_DEFAULTS', 'true');
 
     const { AuthProvider } = await import('./AuthContext');
 

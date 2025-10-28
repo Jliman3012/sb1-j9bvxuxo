@@ -14,3 +14,8 @@ VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFz
 
 Copy this file to `.env` (or supply equivalent environment variables through your preferred
 configuration mechanism) before running the development server or building the application.
+
+When the variables are not explicitly provided (for example, when running a StackBlitz
+preview), the app now falls back to the above Supabase project automatically. If you want to
+disable this behaviour—for instance, in automated tests—set `VITE_SUPABASE_DISABLE_DEFAULTS`
+to `true` in your environment.
