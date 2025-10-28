@@ -1,3 +1,5 @@
+import Papa, { ParseStepResult } from 'papaparse';
+
 export interface TargetFormat {
   Id: string;
   AccountName: string;
@@ -164,50 +166,32 @@ export function normalizeSideValue(side: string): string {
 }
 
 export function parseCSV(csvText: string): string[][] {
-  const lines: string[][] = [];
-  let currentLine: string[] = [];
-  let currentField = '';
-  let inQuotes = false;
+  const rows: string[][] = [];
+  const sanitizedText = csvText.startsWith('\uFEFF') ? csvText.slice(1) : csvText;
 
-  for (let i = 0; i < csvText.length; i++) {
-    const char = csvText[i];
-    const nextChar = csvText[i + 1];
-
-    if (char === '"') {
-      if (inQuotes && nextChar === '"') {
-        currentField += '"';
-        i++;
-      } else {
-        inQuotes = !inQuotes;
+  Papa.parse<string[]>(sanitizedText, {
+    delimiter: '',
+    delimitersToGuess: [',', ';', '\t'],
+    skipEmptyLines: 'greedy',
+    step: (results: ParseStepResult<string[]>) => {
+      if (results.errors.length > 0) {
+        return;
       }
-    } else if (char === ',' && !inQuotes) {
-      currentLine.push(currentField.trim());
-      currentField = '';
-    } else if ((char === '\n' || char === '\r') && !inQuotes) {
-      if (currentField || currentLine.length > 0) {
-        currentLine.push(currentField.trim());
-        if (currentLine.some(field => field !== '')) {
-          lines.push(currentLine);
-        }
-        currentLine = [];
-        currentField = '';
-      }
-      if (char === '\r' && nextChar === '\n') {
-        i++;
-      }
-    } else {
-      currentField += char;
-    }
-  }
 
-  if (currentField || currentLine.length > 0) {
-    currentLine.push(currentField.trim());
-    if (currentLine.some(field => field !== '')) {
-      lines.push(currentLine);
-    }
-  }
+      const row = results.data;
+      if (!Array.isArray(row)) {
+        return;
+      }
 
-  return lines;
+      const trimmedRow = row.map(cell => (cell ?? '').toString().trim());
+
+      if (trimmedRow.length > 0 && trimmedRow.some(field => field !== '')) {
+        rows.push(trimmedRow);
+      }
+    },
+  });
+
+  return rows;
 }
 
 export function normalizeCSV(csvText: string): { normalized: string; stats: { rowsProcessed: number; columnsMatched: number; broker: string | null } } {
