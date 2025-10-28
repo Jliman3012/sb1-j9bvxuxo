@@ -1,40 +1,58 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
+let supabaseConfigurationError: Error | null = null;
+
 if (!supabaseUrl || !supabaseAnonKey) {
-  throw new Error('Missing Supabase environment variables');
+  supabaseConfigurationError = new Error(
+    'Supabase configuration is missing. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.',
+  );
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-  auth: {
-    persistSession: true,
-    autoRefreshToken: true,
-    detectSessionInUrl: true,
-    storage: {
-      getItem: (key: string) => {
-        const persistSession = localStorage.getItem('keepMeSignedIn') === 'true';
-        if (persistSession) {
-          return localStorage.getItem(key);
-        }
-        return sessionStorage.getItem(key);
-      },
-      setItem: (key: string, value: string) => {
-        const persistSession = localStorage.getItem('keepMeSignedIn') === 'true';
-        if (persistSession) {
-          localStorage.setItem(key, value);
-        } else {
-          sessionStorage.setItem(key, value);
-        }
-      },
-      removeItem: (key: string) => {
-        localStorage.removeItem(key);
-        sessionStorage.removeItem(key);
-      },
-    },
-  },
-});
+const supabaseClient =
+  supabaseUrl && supabaseAnonKey
+    ? createClient(supabaseUrl, supabaseAnonKey, {
+        auth: {
+          persistSession: true,
+          autoRefreshToken: true,
+          detectSessionInUrl: true,
+          storage: {
+            getItem: (key: string) => {
+              const persistSession = localStorage.getItem('keepMeSignedIn') === 'true';
+              if (persistSession) {
+                return localStorage.getItem(key);
+              }
+              return sessionStorage.getItem(key);
+            },
+            setItem: (key: string, value: string) => {
+              const persistSession = localStorage.getItem('keepMeSignedIn') === 'true';
+              if (persistSession) {
+                localStorage.setItem(key, value);
+              } else {
+                sessionStorage.setItem(key, value);
+              }
+            },
+            removeItem: (key: string) => {
+              localStorage.removeItem(key);
+              sessionStorage.removeItem(key);
+            },
+          },
+        },
+      })
+    : new Proxy({} as SupabaseClient, {
+        get() {
+          throw (
+            supabaseConfigurationError ??
+            new Error('Supabase client is unavailable due to missing configuration.')
+          );
+        },
+      });
+
+export const supabase: SupabaseClient = supabaseClient;
+export const isSupabaseConfigured = !supabaseConfigurationError;
+export { supabaseConfigurationError };
 
 export type Profile = {
   id: string;
