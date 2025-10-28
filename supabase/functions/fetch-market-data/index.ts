@@ -1,3 +1,5 @@
+/// <reference path="../_shared/edge-env.d.ts" />
+
 import { fetchFromPolygon, MarketDataBar } from './providers/polygon.ts';
 
 const corsHeaders = {

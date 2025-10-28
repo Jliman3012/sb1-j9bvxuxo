@@ -1,3 +1,5 @@
+/// <reference path="../../_shared/edge-env.d.ts" />
+
 export interface MarketDataRequest {
   symbol: string;
   from: string;
