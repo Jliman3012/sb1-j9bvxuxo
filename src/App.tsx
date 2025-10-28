@@ -20,6 +20,7 @@ import GoalsTracker from './components/GoalsTracker';
 import WeeklyReport from './components/WeeklyReport';
 import TradeReplay from './components/TradeReplay';
 import { supabase } from './lib/supabase';
+import CalendarPage from './pages/CalendarPage';
 
 function AppContent() {
   const { user, loading } = useAuth();
@@ -73,6 +74,8 @@ function AppContent() {
             <GoalsTracker />
           </div>
         );
+      case 'calendar':
+        return <CalendarPage />;
       case 'ai-coach':
         return <AICoach />;
       case 'gamification':
