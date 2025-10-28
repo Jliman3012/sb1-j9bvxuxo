@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
-import { Play, Pause, RotateCcw, ChevronLeft, Gauge, TrendingUp, TrendingDown, Clock } from 'lucide-react';
-import { createChart, IChartApi, ISeriesApi } from 'lightweight-charts';
+import { Play, Pause, RotateCcw, ChevronLeft, Gauge, TrendingUp, Clock } from 'lucide-react';
+import { createChart, IChartApi, ISeriesApi, SeriesMarker } from 'lightweight-charts';
 
 interface Trade {
   id: string;
@@ -42,12 +42,17 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const badgeCheckInProgressRef = useRef(false);
 
   useEffect(() => {
     loadTrades();
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
+      resizeObserverRef.current?.disconnect();
       if (chartRef.current) chartRef.current.remove();
+      chartRef.current = null;
+      seriesRef.current = null;
     };
   }, []);
 
@@ -135,8 +140,6 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
 
       setTickData(ticks);
       setInsights(aiInsights);
-      initializeChart(ticks, trade);
-
       if (!trade.replay_reviewed) {
         await supabase
           .from('trades')
@@ -153,8 +156,6 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
   };
 
   const generateInsights = (trade: Trade, ticks: TickData[]): string => {
-    const entryIndex = 0;
-    const exitIndex = ticks.length - 1;
     const optimalEntryPrice = Math.min(...ticks.slice(0, Math.floor(ticks.length * 0.2)).map(t => t.price));
     const entryDiff = Math.abs(trade.entry_price - optimalEntryPrice);
     const pnlPercent = ((trade.pnl / (trade.entry_price * trade.quantity)) * 100).toFixed(2);
@@ -185,132 +186,173 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
   };
 
   const initializeChart = (ticks: TickData[], trade: Trade) => {
-    if (!chartContainerRef.current) return;
+    const container = chartContainerRef.current;
+    if (!container) return;
 
-    if (chartRef.current) {
-      chartRef.current.remove();
+    if (!chartRef.current) {
+      const chart = createChart(container, {
+        width: container.clientWidth,
+        height: 400,
+        layout: {
+          background: { color: '#1f2937' },
+          textColor: '#d1d5db',
+        },
+        grid: {
+          vertLines: { color: '#374151' },
+          horzLines: { color: '#374151' },
+        },
+        timeScale: {
+          timeVisible: true,
+          secondsVisible: true,
+        },
+      });
+
+      const candlestickSeries = chart.addCandlestickSeries({
+        upColor: '#10b981',
+        downColor: '#ef4444',
+        borderUpColor: '#10b981',
+        borderDownColor: '#ef4444',
+        wickUpColor: '#10b981',
+        wickDownColor: '#ef4444',
+      });
+
+      chartRef.current = chart;
+      seriesRef.current = candlestickSeries;
+
+      resizeObserverRef.current = new ResizeObserver(() => {
+        if (chartRef.current && chartContainerRef.current) {
+          chartRef.current.applyOptions({ width: chartContainerRef.current.clientWidth });
+        }
+      });
+
+      resizeObserverRef.current.observe(container);
     }
 
-    const chart = createChart(chartContainerRef.current, {
-      width: chartContainerRef.current.clientWidth,
-      height: 400,
-      layout: {
-        background: { color: '#1f2937' },
-        textColor: '#d1d5db',
-      },
-      grid: {
-        vertLines: { color: '#374151' },
-        horzLines: { color: '#374151' },
-      },
-      timeScale: {
-        timeVisible: true,
-        secondsVisible: true,
-      },
-    });
-
-    const candlestickSeries = chart.addCandlestickSeries({
-      upColor: '#10b981',
-      downColor: '#ef4444',
-      borderUpColor: '#10b981',
-      borderDownColor: '#ef4444',
-      wickUpColor: '#10b981',
-      wickDownColor: '#ef4444',
-    });
-
-    const candleData = ticks.map((tick, idx) => {
-      const nextTick = ticks[idx + 1] || tick;
-      return {
-        time: tick.time,
-        open: tick.price,
-        high: Math.max(tick.price, nextTick.price) + Math.random() * 0.5,
-        low: Math.min(tick.price, nextTick.price) - Math.random() * 0.5,
-        close: nextTick.price,
-      };
-    });
-
-    candlestickSeries.setData(candleData);
-
-    const entryMarker = {
+    const entryMarker: SeriesMarker<'Candlestick'> = {
       time: ticks[0].time,
-      position: trade.trade_type === 'long' ? 'belowBar' : 'aboveBar' as const,
+      position: trade.trade_type === 'long' ? 'belowBar' : 'aboveBar',
       color: '#3b82f6',
-      shape: 'arrowUp' as const,
+      shape: 'arrowUp',
       text: `Entry: $${trade.entry_price.toFixed(2)}`,
     };
 
-    const exitMarker = trade.exit_price ? {
-      time: ticks[ticks.length - 1].time,
-      position: trade.trade_type === 'long' ? 'aboveBar' : 'belowBar' as const,
-      color: trade.pnl >= 0 ? '#10b981' : '#ef4444',
-      shape: 'arrowDown' as const,
-      text: `Exit: $${trade.exit_price.toFixed(2)}`,
-    } : null;
+    const exitMarker: SeriesMarker<'Candlestick'> | null = trade.exit_price
+      ? {
+          time: ticks[ticks.length - 1].time,
+          position: trade.trade_type === 'long' ? 'aboveBar' : 'belowBar',
+          color: trade.pnl >= 0 ? '#10b981' : '#ef4444',
+          shape: 'arrowDown',
+          text: `Exit: $${trade.exit_price.toFixed(2)}`,
+        }
+      : null;
 
-    const markers = exitMarker ? [entryMarker, exitMarker] : [entryMarker];
-    candlestickSeries.setMarkers(markers);
+    const markers: SeriesMarker<'Candlestick'>[] = exitMarker ? [entryMarker, exitMarker] : [entryMarker];
+    seriesRef.current?.setMarkers(markers);
 
-    chart.timeScale().fitContent();
-
-    chartRef.current = chart;
-    seriesRef.current = candlestickSeries;
+    chartRef.current?.timeScale().fitContent();
   };
 
   const checkReplayBadge = async () => {
-    const { data: reviewedCount } = await supabase
-      .from('trades')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', user!.id)
-      .eq('replay_reviewed', true);
+    if (badgeCheckInProgressRef.current) return;
+    badgeCheckInProgressRef.current = true;
 
-    if (reviewedCount && reviewedCount >= 5) {
-      await supabase.from('gamification').upsert({
-        user_id: user!.id,
-        achievement: 'replay_master',
-        achievement_data: { reviewed_count: reviewedCount }
-      }, { onConflict: 'user_id,achievement' });
+    try {
+      const { count, error } = await supabase
+        .from('trades')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', user!.id)
+        .eq('replay_reviewed', true);
+
+      if (error) throw error;
+
+      if ((count ?? 0) >= 5) {
+        const { error: upsertError } = await supabase.from('gamification').upsert(
+          {
+            user_id: user!.id,
+            achievement: 'replay_master',
+            achievement_data: { reviewed_count: count },
+          },
+          { onConflict: 'user_id,achievement' }
+        );
+
+        if (upsertError) throw upsertError;
+      }
+    } catch (err) {
+      console.error('Error updating replay badge:', err);
+    } finally {
+      badgeCheckInProgressRef.current = false;
     }
   };
 
   const togglePlayPause = () => {
-    if (isPlaying) {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      setIsPlaying(false);
-    } else {
-      setIsPlaying(true);
-      intervalRef.current = setInterval(() => {
-        setCurrentTick(prev => {
-          if (prev >= tickData.length - 1) {
-            setIsPlaying(false);
-            if (intervalRef.current) clearInterval(intervalRef.current);
-            return prev;
-          }
-          return prev + 1;
-        });
-      }, 100 / speed);
-    }
+    setIsPlaying(prev => !prev);
   };
 
   const resetReplay = () => {
     setCurrentTick(0);
     setIsPlaying(false);
-    if (intervalRef.current) clearInterval(intervalRef.current);
   };
 
   useEffect(() => {
     if (chartRef.current && seriesRef.current && tickData.length > 0) {
-      const visibleData = tickData.slice(0, currentTick + 1).map((tick, idx) => {
-        const nextTick = tickData[idx + 1] || tick;
+      const visibleTicks = tickData.slice(0, currentTick + 1);
+      const visibleData = visibleTicks.map((tick, idx) => {
+        const previousTick = visibleTicks[idx - 1] || tick;
         return {
           time: tick.time,
-          open: tick.price,
-          high: Math.max(tick.price, nextTick.price) + Math.random() * 0.5,
-          low: Math.min(tick.price, nextTick.price) - Math.random() * 0.5,
-          close: nextTick.price,
+          open: previousTick.price,
+          high: Math.max(tick.price, previousTick.price),
+          low: Math.min(tick.price, previousTick.price),
+          close: tick.price,
         };
       });
+
       seriesRef.current.setData(visibleData);
     }
   }, [currentTick, tickData]);
+
+  useEffect(() => {
+    if (selectedTrade && tickData.length > 0) {
+      initializeChart(tickData, selectedTrade);
+    }
+  }, [selectedTrade, tickData]);
+
+  useEffect(() => {
+    if (!selectedTrade && chartRef.current) {
+      resizeObserverRef.current?.disconnect();
+      resizeObserverRef.current = null;
+      chartRef.current.remove();
+      chartRef.current = null;
+      seriesRef.current = null;
+    }
+  }, [selectedTrade]);
+
+  useEffect(() => {
+    if (!isPlaying || tickData.length === 0) {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      return;
+    }
+
+    const interval = setInterval(() => {
+      setCurrentTick(prev => {
+        if (prev >= tickData.length - 1) {
+          setIsPlaying(false);
+          return prev;
+        }
+        return prev + 1;
+      });
+    }, Math.max(50, 400 / speed));
+
+    intervalRef.current = interval;
+
+    return () => {
+      clearInterval(interval);
+      intervalRef.current = null;
+    };
+  }, [isPlaying, speed, tickData]);
 
   const formatDuration = (ms: number) => {
     const seconds = Math.floor(ms / 1000);
