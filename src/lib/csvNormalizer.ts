@@ -81,12 +81,49 @@ const BROKER_PRESETS: { [key: string]: { [key: string]: string } } = {
   },
 };
 
+export interface NormalizationStats {
+  rowsProcessed: number;
+  columnsMatched: number;
+  broker: string | null;
+  rowsMissingIdentifiers: number;
+  deterministicIdsAssigned: number;
+}
+
+function generateDeterministicId(row: Record<string, string>, fallbackSeed: string): string {
+  const stableFields = [
+    row.ExchangeOrderId,
+    row.PlatformOrderId,
+    row.AccountName,
+    row.ContractName,
+    row.CreatedAt,
+    row.TradeDay,
+    row.ExecutePrice,
+    row.Size,
+    row.Side,
+  ].filter(Boolean);
+
+  const source = stableFields.length > 0 ? stableFields.join('|') : fallbackSeed;
+
+  let hash = 0;
+  for (let i = 0; i < source.length; i++) {
+    hash = (hash * 31 + source.charCodeAt(i)) >>> 0;
+  }
+
+  return `ORDER_${hash.toString(16).padStart(8, '0')}`;
+}
+
 export function normalizeColumnName(colName: string): string {
   const normalized = colName.toLowerCase().trim().replace(/[^a-z0-9]/g, '_');
 
   for (const [targetCol, aliases] of Object.entries(COLUMN_MAPPINGS)) {
-    if (aliases.some(alias => normalized.includes(alias) || alias.includes(normalized))) {
-      return targetCol;
+    for (const alias of aliases) {
+      if (targetCol === 'Id' && alias === 'id' && normalized !== 'id') {
+        continue;
+      }
+
+      if (normalized.includes(alias) || alias.includes(normalized)) {
+        return targetCol;
+      }
     }
   }
 
@@ -210,7 +247,7 @@ export function parseCSV(csvText: string): string[][] {
   return lines;
 }
 
-export function normalizeCSV(csvText: string): { normalized: string; stats: { rowsProcessed: number; columnsMatched: number; broker: string | null } } {
+export function normalizeCSV(csvText: string): { normalized: string; stats: NormalizationStats } {
   const lines = parseCSV(csvText);
 
   if (lines.length === 0) {
@@ -247,6 +284,8 @@ export function normalizeCSV(csvText: string): { normalized: string; stats: { ro
   ];
 
   const normalizedLines: string[][] = [targetHeadersOrdered];
+  let rowsMissingIdentifiers = 0;
+  let deterministicIdsAssigned = 0;
 
   for (let i = 1; i < lines.length; i++) {
     const row = lines[i];
@@ -255,7 +294,7 @@ export function normalizeCSV(csvText: string): { normalized: string; stats: { ro
       continue;
     }
 
-    const normalizedRow: string[] = [];
+    const normalizedRow: Record<string, string> = {};
 
     for (const targetHeader of targetHeadersOrdered) {
       const sourceIndex = columnMap[targetHeader];
@@ -277,14 +316,35 @@ export function normalizeCSV(csvText: string): { normalized: string; stats: { ro
         value = normalizeSideValue(value);
       }
 
-      if (targetHeader === 'Id' && !value) {
-        value = `ORDER_${Date.now()}_${i}`;
-      }
-
-      normalizedRow.push(value);
+      normalizedRow[targetHeader] = value;
     }
 
-    normalizedLines.push(normalizedRow);
+    const hadAnyIdentifier = ['Id', 'ExchangeOrderId', 'PlatformOrderId'].some(identifier => {
+      const sourceIndex = columnMap[identifier];
+      if (sourceIndex === undefined) return false;
+      const originalValue = row[sourceIndex];
+      return originalValue !== undefined && originalValue.trim() !== '';
+    });
+
+    const fallbackIdentifier = normalizedRow.ExchangeOrderId || normalizedRow.PlatformOrderId;
+
+    if (!normalizedRow.Id) {
+      if (fallbackIdentifier) {
+        normalizedRow.Id = fallbackIdentifier;
+      } else {
+        normalizedRow.Id = generateDeterministicId(
+          normalizedRow,
+          `${i}:${row.join('|')}`
+        );
+        deterministicIdsAssigned++;
+      }
+    }
+
+    if (!hadAnyIdentifier) {
+      rowsMissingIdentifiers++;
+    }
+
+    normalizedLines.push(targetHeadersOrdered.map(header => normalizedRow[header] || ''));
   }
 
   const csvOutput = normalizedLines.map(row =>
@@ -302,6 +362,8 @@ export function normalizeCSV(csvText: string): { normalized: string; stats: { ro
       rowsProcessed: normalizedLines.length - 1,
       columnsMatched: Object.keys(columnMap).length,
       broker: broker || 'unknown',
+      rowsMissingIdentifiers,
+      deterministicIdsAssigned,
     },
   };
 }

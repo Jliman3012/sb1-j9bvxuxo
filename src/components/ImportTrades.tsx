@@ -16,6 +16,7 @@ export default function ImportTrades({ onClose, onSuccess }: ImportTradesProps) 
   const [loading, setLoading] = useState(false);
   const [normalizing, setNormalizing] = useState(false);
   const [error, setError] = useState('');
+  const [warning, setWarning] = useState('');
   const [success, setSuccess] = useState('');
   const [preview, setPreview] = useState<ParsedTrade[]>([]);
   const [accountId, setAccountId] = useState('');
@@ -52,6 +53,7 @@ export default function ImportTrades({ onClose, onSuccess }: ImportTradesProps) 
     console.log('✅ File detected:', selectedFile.name, 'Size:', selectedFile.size, 'bytes');
     setFile(selectedFile);
     setError('');
+    setWarning('');
     setSuccess('');
     setNormalizationStats(null);
 
@@ -76,6 +78,14 @@ export default function ImportTrades({ onClose, onSuccess }: ImportTradesProps) 
       setNormalizedCSV(normalized);
       setNormalizationStats(stats);
 
+      if (stats.rowsMissingIdentifiers > 0) {
+        const warningMsg = `${stats.rowsMissingIdentifiers} row${stats.rowsMissingIdentifiers === 1 ? '' : 's'} are missing Id, ExchangeOrderId, and PlatformOrderId. Deterministic IDs were generated to keep imports stable.`;
+        console.warn('⚠️', warningMsg);
+        setWarning(warningMsg);
+      } else {
+        setWarning('');
+      }
+
       console.log('⏳ Parsing normalized CSV...');
       const parsed = parseNormalizedCSV(normalized);
       console.log('✅ Parsed', parsed.length, 'trades');
@@ -93,6 +103,7 @@ export default function ImportTrades({ onClose, onSuccess }: ImportTradesProps) 
       const errorMsg = err instanceof Error ? err.message : 'Error processing CSV file';
       console.error('❌ CSV processing error:', errorMsg, err);
       setError(errorMsg);
+      setWarning('');
       setPreview([]);
     } finally {
       setNormalizing(false);
@@ -269,6 +280,13 @@ export default function ImportTrades({ onClose, onSuccess }: ImportTradesProps) 
             </div>
           )}
 
+          {warning && !error && (
+            <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 text-yellow-700 dark:text-yellow-400 px-4 py-3 rounded-lg flex items-center space-x-2">
+              <AlertCircle className="w-5 h-5" />
+              <span>{warning}</span>
+            </div>
+          )}
+
           {success && (
             <div className="bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-400 px-4 py-3 rounded-lg flex items-center space-x-2">
               <CheckCircle className="w-5 h-5" />
@@ -352,7 +370,7 @@ export default function ImportTrades({ onClose, onSuccess }: ImportTradesProps) 
           {normalizationStats && (
             <div className="bg-slate-50 dark:bg-slate-900 rounded-lg p-4 border border-slate-200 dark:border-slate-700">
               <h4 className="font-semibold text-gray-900 dark:text-white mb-2">Normalization Summary</h4>
-              <div className="grid grid-cols-3 gap-4 text-sm">
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
                 <div>
                   <p className="text-gray-600 dark:text-gray-400">Rows Processed</p>
                   <p className="text-lg font-bold text-gray-900 dark:text-white">{normalizationStats.rowsProcessed}</p>
@@ -364,6 +382,14 @@ export default function ImportTrades({ onClose, onSuccess }: ImportTradesProps) 
                 <div>
                   <p className="text-gray-600 dark:text-gray-400">Broker Format</p>
                   <p className="text-lg font-bold text-gray-900 dark:text-white capitalize">{normalizationStats.broker}</p>
+                </div>
+                <div>
+                  <p className="text-gray-600 dark:text-gray-400">Rows Missing Identifiers</p>
+                  <p className="text-lg font-bold text-gray-900 dark:text-white">{normalizationStats.rowsMissingIdentifiers}</p>
+                </div>
+                <div>
+                  <p className="text-gray-600 dark:text-gray-400">Deterministic IDs Generated</p>
+                  <p className="text-lg font-bold text-gray-900 dark:text-white">{normalizationStats.deterministicIdsAssigned}</p>
                 </div>
               </div>
               <button
