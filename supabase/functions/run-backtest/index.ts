@@ -1,3 +1,5 @@
+/// <reference path="../_shared/edge-env.d.ts" />
+
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4';
 
 const corsHeaders = {

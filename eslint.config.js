@@ -42,5 +42,19 @@ export default tseslint.config(
         },
       ],
     },
+  },
+  {
+    files: ['supabase/functions/**/*.ts'],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.worker,
+        ...globals.es2021,
+        ...globals.deno,
+      },
+    },
+    rules: {
+      '@typescript-eslint/triple-slash-reference': 'off',
+    },
   }
 );
