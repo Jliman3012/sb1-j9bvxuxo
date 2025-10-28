@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
-import { Play, Pause, RotateCcw, ChevronLeft, Gauge, TrendingUp, TrendingDown, Clock } from 'lucide-react';
-import { createChart, IChartApi, ISeriesApi } from 'lightweight-charts';
+import { Play, Pause, RotateCcw, ChevronLeft, Gauge, TrendingUp, Clock } from 'lucide-react';
+import { createChart, IChartApi, ISeriesApi, SeriesMarker } from 'lightweight-charts';
 
 interface Trade {
   id: string;
@@ -44,22 +44,40 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const isCheckingBadgeRef = useRef(false);
 
   useEffect(() => {
+    if (!user) return;
     loadTrades();
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      if (chartRef.current) chartRef.current.remove();
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      if (resizeObserverRef.current) {
+        if (chartContainerRef.current) {
+          resizeObserverRef.current.unobserve(chartContainerRef.current);
+        }
+        resizeObserverRef.current.disconnect();
+        resizeObserverRef.current = null;
+      }
+      if (chartRef.current) {
+        chartRef.current.remove();
+        chartRef.current = null;
+        seriesRef.current = null;
+      }
     };
-  }, []);
+  }, [user]);
 
   const loadTrades = async () => {
+    if (!user) return;
     try {
       const { data, error } = await supabase
         .from('trades')
         .select('*')
-        .eq('user_id', user!.id)
+        .eq('user_id', user.id)
         .not('exit_date', 'is', null)
         .order('entry_date', { ascending: false })
         .limit(50);
@@ -100,6 +118,7 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
   };
 
   const selectTrade = async (trade: Trade) => {
+    if (!user) return;
     setSelectedTrade(trade);
     setCurrentTick(0);
     setIsPlaying(false);
@@ -122,14 +141,15 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
         await supabase
           .from('trade_replays')
           .update({ times_viewed: (replayData.times_viewed || 0) + 1 })
-          .eq('id', replayData.id);
+          .eq('id', replayData.id)
+          .eq('user_id', user.id);
       } else {
         ticks = generateSyntheticTickData(trade);
         aiInsights = generateInsights(trade, ticks);
 
         await supabase.from('trade_replays').insert({
           trade_id: trade.id,
-          user_id: user!.id,
+          user_id: user.id,
           tick_data: ticks,
           replay_insights: aiInsights,
           times_viewed: 1
@@ -138,13 +158,13 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
 
       setTickData(ticks);
       setInsights(aiInsights);
-      initializeChart(ticks, trade);
 
       if (!trade.replay_reviewed) {
         await supabase
           .from('trades')
           .update({ replay_reviewed: true })
-          .eq('id', trade.id);
+          .eq('id', trade.id)
+          .eq('user_id', user.id);
 
         await checkReplayBadge();
       }
@@ -156,8 +176,6 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
   };
 
   const generateInsights = (trade: Trade, ticks: TickData[]): string => {
-    const entryIndex = 0;
-    const exitIndex = ticks.length - 1;
     const optimalEntryPrice = Math.min(...ticks.slice(0, Math.floor(ticks.length * 0.2)).map(t => t.price));
     const entryDiff = Math.abs(trade.entry_price - optimalEntryPrice);
     const pnlPercent = ((trade.pnl / (trade.entry_price * trade.quantity)) * 100).toFixed(2);
@@ -187,12 +205,8 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
     return insights;
   };
 
-  const initializeChart = (ticks: TickData[], trade: Trade) => {
-    if (!chartContainerRef.current) return;
-
-    if (chartRef.current) {
-      chartRef.current.remove();
-    }
+  const initializeChart = () => {
+    if (!chartContainerRef.current || chartRef.current) return;
 
     const chart = createChart(chartContainerRef.current, {
       width: chartContainerRef.current.clientWidth,
@@ -220,6 +234,25 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
       wickDownColor: '#ef4444',
     });
 
+    chartRef.current = chart;
+    seriesRef.current = candlestickSeries;
+
+    if (!resizeObserverRef.current) {
+      resizeObserverRef.current = new ResizeObserver(entries => {
+        for (const entry of entries) {
+          if (entry.contentRect.width && chartRef.current) {
+            chartRef.current.applyOptions({ width: entry.contentRect.width });
+          }
+        }
+      });
+    }
+
+    resizeObserverRef.current.observe(chartContainerRef.current);
+  };
+
+  const updateChartData = (ticks: TickData[], trade: Trade) => {
+    if (!seriesRef.current || !chartRef.current || ticks.length === 0) return;
+
     const candleData = ticks.map((tick, idx) => {
       const nextTick = ticks[idx + 1] || tick;
       return {
@@ -231,73 +264,101 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
       };
     });
 
-    candlestickSeries.setData(candleData);
+    seriesRef.current.setData(candleData);
 
-    const entryMarker = {
+    const entryMarker: SeriesMarker<'Candlestick'> = {
       time: ticks[0].time,
-      position: trade.trade_type === 'long' ? 'belowBar' : 'aboveBar' as const,
+      position: trade.trade_type === 'long' ? 'belowBar' : 'aboveBar',
       color: '#3b82f6',
-      shape: 'arrowUp' as const,
+      shape: 'arrowUp',
       text: `Entry: $${trade.entry_price.toFixed(2)}`,
     };
 
-    const exitMarker = trade.exit_price ? {
-      time: ticks[ticks.length - 1].time,
-      position: trade.trade_type === 'long' ? 'aboveBar' : 'belowBar' as const,
-      color: trade.pnl >= 0 ? '#10b981' : '#ef4444',
-      shape: 'arrowDown' as const,
-      text: `Exit: $${trade.exit_price.toFixed(2)}`,
-    } : null;
+    let exitMarker: SeriesMarker<'Candlestick'> | null = null;
+    if (trade.exit_price) {
+      exitMarker = {
+        time: ticks[ticks.length - 1].time,
+        position: trade.trade_type === 'long' ? 'aboveBar' : 'belowBar',
+        color: trade.pnl >= 0 ? '#10b981' : '#ef4444',
+        shape: 'arrowDown',
+        text: `Exit: $${trade.exit_price.toFixed(2)}`,
+      };
+    }
 
-    const markers = exitMarker ? [entryMarker, exitMarker] : [entryMarker];
-    candlestickSeries.setMarkers(markers);
-
-    chart.timeScale().fitContent();
-
-    chartRef.current = chart;
-    seriesRef.current = candlestickSeries;
+    const markers: SeriesMarker<'Candlestick'>[] = exitMarker ? [entryMarker, exitMarker] : [entryMarker];
+    seriesRef.current.setMarkers(markers);
+    chartRef.current.timeScale().fitContent();
   };
 
   const checkReplayBadge = async () => {
-    const { data: reviewedCount } = await supabase
-      .from('trades')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', user!.id)
-      .eq('replay_reviewed', true);
+    if (!user || isCheckingBadgeRef.current) return;
+    isCheckingBadgeRef.current = true;
+    try {
+      const { count, error } = await supabase
+        .from('trades')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', user.id)
+        .eq('replay_reviewed', true);
 
-    if (reviewedCount && reviewedCount >= 5) {
-      await supabase.from('gamification').upsert({
-        user_id: user!.id,
-        achievement: 'replay_master',
-        achievement_data: { reviewed_count: reviewedCount }
-      }, { onConflict: 'user_id,achievement' });
+      if (error) throw error;
+
+      if ((count ?? 0) >= 5) {
+        const { error: upsertError } = await supabase.from('gamification').upsert({
+          user_id: user.id,
+          achievement: 'replay_master',
+          achievement_data: { reviewed_count: count ?? 0 }
+        }, { onConflict: 'user_id,achievement' });
+
+        if (upsertError) throw upsertError;
+      }
+    } catch (err) {
+      console.error('Error awarding replay badge:', err);
+    } finally {
+      isCheckingBadgeRef.current = false;
     }
   };
 
   const togglePlayPause = () => {
-    if (isPlaying) {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      setIsPlaying(false);
-    } else {
-      setIsPlaying(true);
-      intervalRef.current = setInterval(() => {
-        setCurrentTick(prev => {
-          if (prev >= tickData.length - 1) {
-            setIsPlaying(false);
-            if (intervalRef.current) clearInterval(intervalRef.current);
-            return prev;
-          }
-          return prev + 1;
-        });
-      }, 100 / speed);
-    }
+    setIsPlaying(prev => !prev);
   };
 
   const resetReplay = () => {
     setCurrentTick(0);
     setIsPlaying(false);
-    if (intervalRef.current) clearInterval(intervalRef.current);
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
   };
+
+  useEffect(() => {
+    if (!isPlaying || tickData.length === 0) return;
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+
+    intervalRef.current = setInterval(() => {
+      setCurrentTick(prev => {
+        if (prev >= tickData.length - 1) {
+          setIsPlaying(false);
+          if (intervalRef.current) {
+            clearInterval(intervalRef.current);
+            intervalRef.current = null;
+          }
+          return prev;
+        }
+        return prev + 1;
+      });
+    }, Math.max(50, 200 / speed));
+
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+  }, [isPlaying, speed, tickData]);
 
   useEffect(() => {
     if (chartRef.current && seriesRef.current && tickData.length > 0) {
@@ -314,6 +375,28 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
       seriesRef.current.setData(visibleData);
     }
   }, [currentTick, tickData]);
+
+  useEffect(() => {
+    if (!selectedTrade || tickData.length === 0) return;
+    initializeChart();
+    updateChartData(tickData, selectedTrade);
+  }, [selectedTrade, tickData]);
+
+  useEffect(() => {
+    if (selectedTrade) return;
+    if (resizeObserverRef.current) {
+      if (chartContainerRef.current) {
+        resizeObserverRef.current.unobserve(chartContainerRef.current);
+      }
+      resizeObserverRef.current.disconnect();
+      resizeObserverRef.current = null;
+    }
+    if (chartRef.current) {
+      chartRef.current.remove();
+      chartRef.current = null;
+      seriesRef.current = null;
+    }
+  }, [selectedTrade]);
 
   const formatDuration = (ms: number) => {
     const seconds = Math.floor(ms / 1000);
@@ -402,7 +485,10 @@ export default function TradeReplay({ onBack }: TradeReplayProps) {
       <div className="flex items-center justify-between">
         <div className="flex items-center space-x-4">
           <button
-            onClick={() => setSelectedTrade(null)}
+            onClick={() => {
+              resetReplay();
+              setSelectedTrade(null);
+            }}
             className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition"
           >
             <ChevronLeft className="w-5 h-5" />
