@@ -1,6 +1,10 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
 import { User } from '@supabase/supabase-js';
-import { supabase } from '../lib/supabase';
+import {
+  supabase,
+  isSupabaseConfigured,
+  supabaseConfigurationError,
+} from '../lib/supabase';
 
 interface AuthContextType {
   user: User | null;
@@ -15,6 +19,49 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+
+  if (!isSupabaseConfigured) {
+    const configurationError =
+      supabaseConfigurationError ??
+      new Error('Supabase client is unavailable due to missing configuration.');
+
+    const disabledSignUp: AuthContextType['signUp'] = async () => {
+      throw configurationError;
+    };
+
+    const disabledSignIn: AuthContextType['signIn'] = async () => {
+      throw configurationError;
+    };
+
+    const disabledSignOut: AuthContextType['signOut'] = async () => {
+      throw configurationError;
+    };
+
+    return (
+      <AuthContext.Provider
+        value={{
+          user: null,
+          loading: false,
+          signUp: disabledSignUp,
+          signIn: disabledSignIn,
+          signOut: disabledSignOut,
+        }}
+      >
+        <div
+          role="alert"
+          className="min-h-screen bg-slate-50 dark:bg-gray-900 flex flex-col items-center justify-center px-4 text-center"
+        >
+          <h1 className="text-2xl font-semibold text-gray-900 dark:text-white mb-2">
+            Supabase configuration is missing
+          </h1>
+          <p className="text-gray-600 dark:text-gray-300 max-w-lg">
+            Please set the <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code>{' '}
+            environment variables to enable authentication features.
+          </p>
+        </div>
+      </AuthContext.Provider>
+    );
+  }
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
