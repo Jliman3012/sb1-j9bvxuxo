@@ -366,6 +366,12 @@ export default function ImportTrades({ onClose, onSuccess }: ImportTradesProps) 
                   <p className="text-lg font-bold text-gray-900 dark:text-white capitalize">{normalizationStats.broker}</p>
                 </div>
               </div>
+              {normalizationStats.broker === 'topstep' && (
+                <div className="mt-3 inline-flex items-center space-x-2 rounded-full bg-emerald-100 dark:bg-emerald-900/30 px-3 py-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+                  <Sparkles className="h-3 w-3" />
+                  <span>Detected: Topstep CSV</span>
+                </div>
+              )}
               <button
                 onClick={handleDownloadNormalized}
                 className="mt-3 flex items-center space-x-2 text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
